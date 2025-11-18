@@ -126,12 +126,13 @@ class ModelComparator:
             
             # 收集平均指标（包括MAE）
             for metric in ['R2', 'RMSE']:
-                if metric in summary['metrics_summary']['train']:
-                    data['train_metrics'][metric].append(summary['metrics_summary']['train'][f'{metric}_mean'])
+                metric_key = f'{metric}_mean'
+                if metric_key in summary['metrics_summary']['train']:
+                    data['train_metrics'][metric].append(summary['metrics_summary']['train'][metric_key])
                 else:
                     data['train_metrics'][metric].append(0)
-                if metric in summary['metrics_summary']['val']:
-                    data['val_metrics'][metric].append(summary['metrics_summary']['val'][f'{metric}_mean'])
+                if metric_key in summary['metrics_summary']['val']:
+                    data['val_metrics'][metric].append(summary['metrics_summary']['val'][metric_key])
                 else:
                     data['val_metrics'][metric].append(0)
             
