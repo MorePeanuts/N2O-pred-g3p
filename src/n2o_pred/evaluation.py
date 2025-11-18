@@ -112,7 +112,7 @@ def plot_predictions_vs_actual(
     save_path: Path,
 ) -> None:
     """
-    绘制预测值vs实际值散点图
+    绘制预测值vs实际值散点图（训练集和测试集在同一张图上）
 
     Args:
         train_preds: 训练集预测值
@@ -121,47 +121,53 @@ def plot_predictions_vs_actual(
         test_targets: 测试集真实值
         save_path: 保存路径
     """
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
+    plt.figure(figsize=(10, 8))
 
     # 训练集
-    ax1.scatter(train_targets, train_preds, alpha=0.5, s=20, label="Train")
-    train_r2 = r2_score(train_targets, train_preds)
-    train_rmse = np.sqrt(mean_squared_error(train_targets, train_preds))
-
-    # 添加y=x参考线
-    min_val = min(train_targets.min(), train_preds.min())
-    max_val = max(train_targets.max(), train_preds.max())
-    ax1.plot([min_val, max_val], [min_val, max_val], "r--", linewidth=2, label="y=x")
-
-    ax1.set_xlabel("Actual N2O Flux", fontsize=12)
-    ax1.set_ylabel("Predicted N2O Flux", fontsize=12)
-    ax1.set_title(
-        f"Train Set (R²={train_r2:.4f}, RMSE={train_rmse:.4f})",
-        fontsize=13,
-        fontweight="bold",
+    plt.scatter(
+        train_targets,
+        train_preds,
+        alpha=0.5,
+        s=20,
+        c="blue",
+        label="Train Set",
+        edgecolors="none",
     )
-    ax1.legend(fontsize=11)
-    ax1.grid(True, alpha=0.3)
 
     # 测试集
-    ax2.scatter(test_targets, test_preds, alpha=0.5, s=20, color="orange", label="Test")
+    plt.scatter(
+        test_targets,
+        test_preds,
+        alpha=0.5,
+        s=20,
+        c="orange",
+        label="Test Set",
+        edgecolors="none",
+    )
+
+    # 计算指标
+    train_r2 = r2_score(train_targets, train_preds)
+    train_rmse = np.sqrt(mean_squared_error(train_targets, train_preds))
     test_r2 = r2_score(test_targets, test_preds)
     test_rmse = np.sqrt(mean_squared_error(test_targets, test_preds))
 
     # 添加y=x参考线
-    min_val = min(test_targets.min(), test_preds.min())
-    max_val = max(test_targets.max(), test_preds.max())
-    ax2.plot([min_val, max_val], [min_val, max_val], "r--", linewidth=2, label="y=x")
+    all_vals = np.concatenate([train_targets, train_preds, test_targets, test_preds])
+    min_val = all_vals.min()
+    max_val = all_vals.max()
+    plt.plot([min_val, max_val], [min_val, max_val], "r--", linewidth=2, label="y=x")
 
-    ax2.set_xlabel("Actual N2O Flux", fontsize=12)
-    ax2.set_ylabel("Predicted N2O Flux", fontsize=12)
-    ax2.set_title(
-        f"Test Set (R²={test_r2:.4f}, RMSE={test_rmse:.4f})",
+    plt.xlabel("Actual N2O Flux", fontsize=12)
+    plt.ylabel("Predicted N2O Flux", fontsize=12)
+    plt.title(
+        f"Predictions vs Actual\n"
+        f"Train: R²={train_r2:.4f}, RMSE={train_rmse:.4f} | "
+        f"Test: R²={test_r2:.4f}, RMSE={test_rmse:.4f}",
         fontsize=13,
         fontweight="bold",
     )
-    ax2.legend(fontsize=11)
-    ax2.grid(True, alpha=0.3)
+    plt.legend(fontsize=11)
+    plt.grid(True, alpha=0.3)
 
     plt.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -328,6 +334,66 @@ def select_good_sequences(
     top_seqs = long_seqs.nlargest(top_n, "R2")
 
     return top_seqs["seq_id"].tolist()
+
+
+def plot_multi_model_sequence_predictions(
+    seq_id: tuple,
+    time_steps: np.ndarray,
+    targets: np.ndarray,
+    model_predictions: dict[str, np.ndarray],
+    save_path: Path,
+) -> None:
+    """
+    绘制多个模型在同一序列上的预测对比图
+
+    Args:
+        seq_id: 序列ID
+        time_steps: 时间步（如sowdur）
+        targets: 真实值
+        model_predictions: 模型名称到预测值的字典
+        save_path: 保存路径
+    """
+    plt.figure(figsize=(12, 6))
+
+    # 绘制真实值
+    plt.plot(
+        time_steps,
+        targets,
+        "ko-",
+        label="Actual",
+        markersize=6,
+        linewidth=2,
+        alpha=0.8,
+    )
+
+    # 为每个模型使用不同的颜色和样式
+    colors = plt.cm.tab10(np.linspace(0, 1, len(model_predictions)))
+    markers = ["s", "^", "D", "v", "p", "h", "*"]
+
+    for i, (model_name, predictions) in enumerate(model_predictions.items()):
+        plt.plot(
+            time_steps,
+            predictions,
+            marker=markers[i % len(markers)],
+            label=model_name,
+            markersize=5,
+            linewidth=1.5,
+            alpha=0.7,
+            color=colors[i],
+        )
+
+    plt.xlabel("Time (days since sowing)", fontsize=12)
+    plt.ylabel("N2O Flux", fontsize=12)
+    plt.title(
+        f"Sequence {seq_id} - Model Comparison", fontsize=14, fontweight="bold"
+    )
+    plt.legend(fontsize=10, loc="best")
+    plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close()
 
 
 def compute_shap_values(

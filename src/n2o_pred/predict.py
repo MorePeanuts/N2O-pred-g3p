@@ -162,27 +162,54 @@ class N2OPredictor:
         else:
             raise ValueError(f"不支持的模型类型: {self.model_type}")
 
-    def _predict_rf(self, data: pd.DataFrame) -> dict[str, Any]:
+    def _predict_rf(self, data: pd.DataFrame | BaseN2ODataset) -> dict[str, Any]:
         """随机森林预测"""
-        if not isinstance(data, pd.DataFrame):
-            # 如果是BaseN2ODataset，展开为DataFrame
-            data = data.flatten_to_dataframe()
+        is_base_dataset = isinstance(data, BaseN2ODataset)
 
-        predictions = self.model.predict(data)
+        if is_base_dataset:
+            # 如果是BaseN2ODataset，展开为DataFrame
+            data_df = data.flatten_to_dataframe()
+        else:
+            data_df = data
+
+        predictions = self.model.predict(data_df)
 
         from .preprocessing import LABELS
 
-        if LABELS[0] in data.columns:
-            targets = data[LABELS[0]].values
+        # 检查是否有标签
+        has_labels = LABELS[0] in data_df.columns
+
+        if has_labels:
+            targets = data_df[LABELS[0]].values
             metrics = compute_metrics(targets, predictions)
         else:
             targets = None
             metrics = None
 
+        # 添加预测值到DataFrame
+        data_df_with_pred = data_df.copy()
+        data_df_with_pred["predicted_daily_fluxes"] = predictions
+
+        # 如果输入是BaseN2ODataset，转换回序列格式并添加预测字段
+        if is_base_dataset:
+            predicted_dataset = BaseN2ODataset.from_dataframe(data_df_with_pred)
+            # 为每个序列添加预测值
+            for i, seq in enumerate(predicted_dataset.sequences):
+                seq["predicted_targets"] = seq["targets"]  # 重命名原来的targets为predicted_targets
+                # 从DataFrame中提取该序列的预测值
+                seq_pred = data_df_with_pred[
+                    (data_df_with_pred["Publication"] == seq["seq_id"][0])
+                    & (data_df_with_pred["control_group"] == seq["seq_id"][1])
+                ]["predicted_daily_fluxes"].values
+                seq["predicted_targets"] = list(seq_pred)
+        else:
+            predicted_dataset = data_df_with_pred
+
         return {
             "predictions": predictions,
             "targets": targets,
             "metrics": metrics,
+            "data_with_predictions": predicted_dataset,
         }
 
     def _predict_rnn_obs(
@@ -207,6 +234,7 @@ class N2OPredictor:
 
         all_predictions = []
         all_targets = []
+        predictions_by_seq = []  # 按序列组织的预测结果
 
         with torch.no_grad():
             for batch in loader:
@@ -237,16 +265,30 @@ class N2OPredictor:
 
                     all_predictions.extend(pred_orig)
                     all_targets.extend(target_orig)
+                    predictions_by_seq.append(list(pred_orig))
 
         predictions = np.array(all_predictions)
         targets = np.array(all_targets)
 
-        metrics = compute_metrics(targets, predictions)
+        # 检查是否有有效的标签
+        has_labels = not np.all(targets == 0)
+        if has_labels:
+            metrics = compute_metrics(targets, predictions)
+        else:
+            metrics = None
+
+        # 添加预测值到原始数据集
+        predicted_dataset = BaseN2ODataset(sequences=[])
+        for i, seq in enumerate(data.sequences):
+            new_seq = seq.copy()
+            new_seq["predicted_targets"] = predictions_by_seq[i]
+            predicted_dataset.sequences.append(new_seq)
 
         return {
             "predictions": predictions,
-            "targets": targets,
+            "targets": targets if has_labels else None,
             "metrics": metrics,
+            "data_with_predictions": predicted_dataset,
         }
 
     def _predict_rnn_daily(
@@ -273,6 +315,7 @@ class N2OPredictor:
 
         all_predictions = []
         all_targets = []
+        predictions_by_seq = []  # 按序列组织的预测结果（只包含真实测量点）
 
         with torch.no_grad():
             for batch in loader:
@@ -306,16 +349,30 @@ class N2OPredictor:
                     # 只保留真实测量点
                     all_predictions.extend(pred_orig[mask_i])
                     all_targets.extend(target_orig[mask_i])
+                    predictions_by_seq.append(list(pred_orig[mask_i]))
 
         predictions = np.array(all_predictions)
         targets = np.array(all_targets)
 
-        metrics = compute_metrics(targets, predictions)
+        # 检查是否有有效的标签
+        has_labels = not np.all(targets == 0)
+        if has_labels:
+            metrics = compute_metrics(targets, predictions)
+        else:
+            metrics = None
+
+        # 添加预测值到原始数据集
+        predicted_dataset = BaseN2ODataset(sequences=[])
+        for i, seq in enumerate(data.sequences):
+            new_seq = seq.copy()
+            new_seq["predicted_targets"] = predictions_by_seq[i]
+            predicted_dataset.sequences.append(new_seq)
 
         return {
             "predictions": predictions,
-            "targets": targets,
+            "targets": targets if has_labels else None,
             "metrics": metrics,
+            "data_with_predictions": predicted_dataset,
         }
 
 
@@ -330,8 +387,8 @@ def predict_with_model(
 
     Args:
         model_dir: 模型目录
-        data_path: 数据路径（.pkl文件）
-        output_path: 输出路径（保存预测结果）
+        data_path: 数据路径（.pkl或.csv文件）
+        output_path: 输出路径（保存带预测结果的数据）
         device: 设备
 
     Returns:
@@ -347,9 +404,14 @@ def predict_with_model(
         with open(data_path, "rb") as f:
             sequences = pickle.load(f)
         data = BaseN2ODataset(sequences)
+        is_sequence_data = True
+        # 将序列数据转换为DataFrame以获取定位信息
+        data_df_for_location = data.flatten_to_dataframe()
     elif data_path.suffix == ".csv":
         # 假设是DataFrame
         data = pd.read_csv(data_path)
+        is_sequence_data = False
+        data_df_for_location = data.copy()
     else:
         raise ValueError(f"不支持的数据格式: {data_path.suffix}")
 
@@ -361,17 +423,57 @@ def predict_with_model(
     logger.info(f"预测完成")
     if results["metrics"]:
         logger.info(f"评估指标: {results['metrics']}")
+    else:
+        logger.info("未提供标签，跳过评估指标计算")
 
     # 保存结果
     if output_path:
         output_path = Path(output_path)
-        save_predictions_to_csv(
-            results["predictions"],
-            results["targets"]
-            if results["targets"] is not None
-            else np.zeros_like(results["predictions"]),
-            output_path,
-        )
-        logger.info(f"预测结果已保存到 {output_path}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # 保存带预测值的数据
+        if is_sequence_data:
+            # 保存为pkl文件
+            if output_path.suffix != ".pkl":
+                output_path = output_path.with_suffix(".pkl")
+            with open(output_path, "wb") as f:
+                pickle.dump(results["data_with_predictions"].sequences, f)
+            logger.info(f"带预测值的序列数据已保存到 {output_path}")
+        else:
+            # 保存为csv文件
+            if output_path.suffix != ".csv":
+                output_path = output_path.with_suffix(".csv")
+            results["data_with_predictions"].to_csv(output_path, index=False)
+            logger.info(f"带预测值的表格数据已保存到 {output_path}")
+
+        # 额外保存预测结果的CSV（用于快速查看，包含定位信息）
+        metrics_output = output_path.parent / f"{output_path.stem}_predictions.csv"
+
+        # 构建包含定位信息的预测结果DataFrame
+        pred_df = pd.DataFrame()
+
+        # 添加定位信息
+        if "No. of obs" in data_df_for_location.columns:
+            pred_df["No. of obs"] = data_df_for_location["No. of obs"].values
+        if "Publication" in data_df_for_location.columns:
+            pred_df["Publication"] = data_df_for_location["Publication"].values
+        if "control_group" in data_df_for_location.columns:
+            pred_df["control_group"] = data_df_for_location["control_group"].values
+        if "sowdur" in data_df_for_location.columns:
+            pred_df["sowdur"] = data_df_for_location["sowdur"].values
+
+        # 添加预测值和真实值
+        pred_df["predicted"] = results["predictions"]
+        if results["targets"] is not None:
+            pred_df["actual"] = results["targets"]
+            pred_df["error"] = results["targets"] - results["predictions"]
+            pred_df["abs_error"] = np.abs(results["targets"] - results["predictions"])
+        else:
+            pred_df["actual"] = np.nan
+            pred_df["error"] = np.nan
+            pred_df["abs_error"] = np.nan
+
+        pred_df.to_csv(metrics_output, index=False)
+        logger.info(f"预测结果摘要已保存到 {metrics_output}")
 
     return results

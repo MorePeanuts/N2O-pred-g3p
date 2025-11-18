@@ -91,12 +91,82 @@ class BaseN2ODataset(Dataset):
                 for j, feat_name in enumerate(CATEGORICAL_DYNAMIC_FEATURES):
                     row[feat_name] = seq["categorical_dynamic"][i][j]
 
-                # 添加目标值
-                row["Daily fluxes"] = seq["targets"][i]
+                # 添加目标值（如果存在）
+                if "targets" in seq:
+                    row["Daily fluxes"] = seq["targets"][i]
 
                 rows.append(row)
 
         return pd.DataFrame(rows)
+
+    @staticmethod
+    def from_dataframe(df: pd.DataFrame) -> "BaseN2ODataset":
+        """
+        从DataFrame重构序列数据
+
+        Args:
+            df: 展开的DataFrame，包含Publication, control_group, sowdur等字段
+
+        Returns:
+            BaseN2ODataset实例
+        """
+        # 按(Publication, control_group)分组，并按sowdur排序
+        df = df.sort_values(["Publication", "control_group", "sowdur"])
+
+        sequences = []
+        for (pub, ctrl_grp), group_df in df.groupby(
+            ["Publication", "control_group"], sort=False
+        ):
+            seq_length = len(group_df)
+
+            # 提取静态数值特征（取第一行即可）
+            numeric_static = [
+                group_df.iloc[0][feat] for feat in NUMERIC_STATIC_FEATURES
+            ]
+
+            # 提取动态数值特征
+            numeric_dynamic = [
+                [group_df.iloc[i][feat] for feat in NUMERIC_DYNAMIC_FEATURES]
+                for i in range(seq_length)
+            ]
+
+            # 提取静态分类特征
+            categorical_static = [
+                group_df.iloc[0][feat] for feat in CATEGORICAL_STATIC_FEATURES
+            ]
+
+            # 提取动态分类特征
+            categorical_dynamic = [
+                [group_df.iloc[i][feat] for feat in CATEGORICAL_DYNAMIC_FEATURES]
+                for i in range(seq_length)
+            ]
+
+            # 提取目标值（如果存在）
+            targets = (
+                group_df["Daily fluxes"].tolist()
+                if "Daily fluxes" in group_df.columns
+                else [0.0] * seq_length
+            )
+
+            # 提取其他信息
+            no_of_obs = group_df["No. of obs"].tolist()
+            sowdurs = group_df["sowdur"].tolist()
+
+            seq = {
+                "seq_id": [pub, ctrl_grp],
+                "seq_length": seq_length,
+                "No. of obs": no_of_obs,
+                "sowdurs": sowdurs,
+                "numeric_static": numeric_static,
+                "numeric_dynamic": numeric_dynamic,
+                "categorical_static": categorical_static,
+                "categorical_dynamic": categorical_dynamic,
+                "targets": targets,
+            }
+
+            sequences.append(seq)
+
+        return BaseN2ODataset(sequences=sequences)
 
 
 class N2ODatasetForObsStepRNN(Dataset):

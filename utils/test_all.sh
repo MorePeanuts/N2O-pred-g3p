@@ -7,4 +7,4 @@ echo "Testing compare function"
 uv run n2o-pred compare --models outputs/test_rf outputs/test_rnn_obs outputs/test_rnn_daily --output outputs/test_compare
 
 echo "Testing predict function"
-uv run n2o-pred predict --model outputs/test_rf/split_1346 --dataset datasets/data_EUR_processed.pkl
+uv run n2o-pred predict --model outputs/test_rf/split_1346 --dataset datasets/data_EUR_processed.pkl --output outputs/test_predict

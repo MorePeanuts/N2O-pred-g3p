@@ -1,0 +1,1 @@
+- Always use `uv run` to run python program and search entry point from `pyproject.toml` file.

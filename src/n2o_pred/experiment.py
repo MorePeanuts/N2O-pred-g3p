@@ -515,6 +515,55 @@ class ExperimentRunner:
         ).sort_values("importance", ascending=False)
         importance_df.to_csv(tables_dir / "feature_importance.csv", index=False)
 
+        # 5. 序列预测图（将DataFrame重构为序列）
+        logger.info("生成序列预测图...")
+
+        # 为val_df添加预测值
+        val_df_with_pred = val_df.copy()
+        val_df_with_pred["predicted_daily_fluxes"] = train_result["val_predictions"]
+
+        # 重构为序列
+        val_base_reconstructed = BaseN2ODataset.from_dataframe(val_df_with_pred)
+
+        # 收集每个序列的预测和真实值
+        val_preds_by_seq = []
+        val_targets_by_seq = []
+        val_seq_ids = []
+
+        for seq in val_base_reconstructed.sequences:
+            val_preds_by_seq.append(
+                val_df_with_pred[
+                    (val_df_with_pred["Publication"] == seq["seq_id"][0])
+                    & (val_df_with_pred["control_group"] == seq["seq_id"][1])
+                ]["predicted_daily_fluxes"].values
+            )
+            val_targets_by_seq.append(np.array(seq["targets"]))
+            val_seq_ids.append(tuple(seq["seq_id"]))
+
+        # 计算每个序列的指标
+        seq_metrics = compute_sequence_metrics(val_preds_by_seq, val_targets_by_seq)
+        seq_metrics["seq_id_tuple"] = val_seq_ids
+
+        # 选择好的长序列
+        good_seq_indices = select_good_sequences(seq_metrics, min_length=15, top_n=5)
+
+        logger.info(f"绘制 {len(good_seq_indices)} 个序列的预测图...")
+        for idx in good_seq_indices:
+            seq = val_base_reconstructed.sequences[idx]
+            seq_id = tuple(seq["seq_id"])
+            time_steps = np.array(seq["sowdurs"])
+            targets = np.array(seq["targets"])
+            predictions = val_preds_by_seq[idx]
+
+            plot_sequence_predictions(
+                seq_id,
+                time_steps,
+                targets,
+                predictions,
+                figs_dir / f"sequence_predictions_{seq_id[0]}_{seq_id[1]}.png",
+                mask=None,
+            )
+
         logger.info(f"输出已保存到 {save_dir}")
 
     def _generate_outputs_rnn(
@@ -636,17 +685,6 @@ class ExperimentRunner:
             seq = val_dataset.processed_sequences[idx]
             seq_id = tuple(seq["seq_id"])
 
-            # 获取时间步
-            if use_mask:
-                # DailyStepRNN: 时间步是从start_day开始的每一天
-                time_steps = np.arange(
-                    val_dataset.daily_sequences[idx]["start_day"],
-                    val_dataset.daily_sequences[idx]["start_day"] + seq["seq_length"],
-                )
-            else:
-                # ObsStepRNN: 使用原始的sowdur
-                time_steps = np.array(val_dataset.sequences[idx]["sowdurs"])
-
             # 获取预测和真实值
             model.eval()
             with torch.no_grad():
@@ -674,7 +712,20 @@ class ExperimentRunner:
                 pred_orig = val_dataset.inverse_transform_targets(pred_scaled)
 
             target_orig = seq_data["targets_original"].numpy()
-            mask_seq = seq_data["mask"].numpy() if use_mask else None
+
+            # 对于RNN-Daily，只绘制真实测量点（与RNN-Obs保持一致）
+            if use_mask:
+                mask_seq = seq_data["mask"].numpy()
+                # 使用原始的sowdurs（只取真实测量点）
+                time_steps = np.array(val_dataset.sequences[idx]["sowdurs"])
+                # 只保留真实测量点的数据
+                pred_orig = pred_orig[mask_seq]
+                target_orig = target_orig[mask_seq]
+                mask_for_plot = None  # 不需要在图中区分插值点
+            else:
+                # ObsStepRNN: 使用原始的sowdur
+                time_steps = np.array(val_dataset.sequences[idx]["sowdurs"])
+                mask_for_plot = None
 
             plot_sequence_predictions(
                 seq_id,
@@ -682,7 +733,7 @@ class ExperimentRunner:
                 target_orig,
                 pred_orig,
                 figs_dir / f"sequence_predictions_{seq_id[0]}_{seq_id[1]}.png",
-                mask=mask_seq,
+                mask=mask_for_plot,
             )
 
         logger.info(f"输出已保存到 {save_dir}")
@@ -708,7 +759,8 @@ class ExperimentRunner:
             "model_type": self.model_type,
             "n_splits": len(seeds),
             "seeds": seeds,
-            "best_split_seed": best_split,
+            "best_seed": best_split,  # 最佳split的种子（用于compare命令）
+            "best_split_seed": best_split,  # 保持向后兼容
             "config": self.config.to_dict(),
             "metrics_summary": {
                 "train": {
