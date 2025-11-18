@@ -124,12 +124,16 @@ class ModelComparator:
             else:
                 data['n_parameters'].append(0)
             
-            # 收集平均指标
+            # 收集平均指标（包括MAE）
             for metric in ['R2', 'RMSE']:
                 if metric in summary['metrics_summary']['train']:
                     data['train_metrics'][metric].append(summary['metrics_summary']['train'][f'{metric}_mean'])
+                else:
+                    data['train_metrics'][metric].append(0)
                 if metric in summary['metrics_summary']['val']:
                     data['val_metrics'][metric].append(summary['metrics_summary']['val'][f'{metric}_mean'])
+                else:
+                    data['val_metrics'][metric].append(0)
             
             # MAE可能不在summary中，尝试从split_results获取
             mae_train_list = []
@@ -140,15 +144,8 @@ class ModelComparator:
                 if 'MAE' in split_result['metrics']['val']:
                     mae_val_list.append(split_result['metrics']['val']['MAE'])
             
-            if mae_train_list:
-                data['train_metrics']['MAE'].append(np.mean(mae_train_list))
-            else:
-                data['train_metrics']['MAE'].append(0)
-            
-            if mae_val_list:
-                data['val_metrics']['MAE'].append(np.mean(mae_val_list))
-            else:
-                data['val_metrics']['MAE'].append(0)
+            data['train_metrics']['MAE'].append(np.mean(mae_train_list) if mae_train_list else 0)
+            data['val_metrics']['MAE'].append(np.mean(mae_val_list) if mae_val_list else 0)
         
         # 按种子组织数据（用于绘制箱线图）
         common_seeds = set(self.summaries[0]['seeds'])

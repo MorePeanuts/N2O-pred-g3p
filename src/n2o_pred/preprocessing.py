@@ -97,6 +97,12 @@ def preprocess_data(
         
         # TN字段前向填充（同序列内）
         group['TN'] = group['TN'].ffill()
+        # 如果仍有NaN（第一个值就是NaN），用后向填充
+        group['TN'] = group['TN'].bfill()
+        # 如果还有NaN，用该列的均值填充（极端情况）
+        if group['TN'].isna().any():
+            mean_tn = df['TN'].mean()
+            group['TN'] = group['TN'].fillna(mean_tn if not pd.isna(mean_tn) else 1.0)
         
         # 构建序列数据结构
         seq_data = {

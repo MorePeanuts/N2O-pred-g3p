@@ -127,8 +127,7 @@ def train_rnn_predictor(
         optimizer,
         mode='min',
         factor=0.5,
-        patience=config.patience // 3,
-        verbose=True
+        patience=config.patience // 3
     )
     
     # 训练历史
@@ -137,6 +136,8 @@ def train_rnn_predictor(
     best_val_loss = float('inf')
     best_epoch = 0
     patience_counter = 0
+    best_model_path = save_dir / 'best_model.pt'
+    best_model_path.parent.mkdir(parents=True, exist_ok=True)
     
     logger.info(f"开始训练，共 {config.max_epochs} 轮")
     logger.info(f"模型参数数量: {model.count_parameters()}")
@@ -170,7 +171,17 @@ def train_rnn_predictor(
                 batch_size = len(seq_lengths)
                 max_len = predictions.shape[1]
                 mask = torch.arange(max_len, device=device).unsqueeze(0) < seq_lengths.unsqueeze(1)
-                loss = criterion(predictions, targets, mask)
+                # 只计算有效序列长度内的损失
+                masked_predictions = predictions[mask]
+                masked_targets = targets[mask]
+                loss = criterion(masked_predictions, masked_targets)
+            
+            # 检查loss是否为NaN
+            if torch.isnan(loss):
+                logger.error(f"检测到NaN损失，跳过该批次")
+                logger.error(f"预测值范围: [{predictions.min().item():.4f}, {predictions.max().item():.4f}]")
+                logger.error(f"目标值范围: [{targets.min().item():.4f}, {targets.max().item():.4f}]")
+                continue
             
             # 反向传播
             optimizer.zero_grad()
@@ -213,12 +224,14 @@ def train_rnn_predictor(
                     batch_size = len(seq_lengths)
                     max_len = predictions.shape[1]
                     mask = torch.arange(max_len, device=device).unsqueeze(0) < seq_lengths.unsqueeze(1)
-                    loss = criterion(predictions, targets, mask)
+                    masked_predictions = predictions[mask]
+                    masked_targets = targets[mask]
+                    loss = criterion(masked_predictions, masked_targets)
                 
                 val_loss += loss.item()
                 val_batches += 1
         
-        avg_val_loss = val_loss / val_batches
+        avg_val_loss = val_loss / max(val_batches, 1)  # 避免除零
         val_losses.append(avg_val_loss)
         
         # 学习率调整
@@ -227,14 +240,13 @@ def train_rnn_predictor(
         logger.info(f'Epoch {epoch+1}: train_loss={avg_train_loss:.6f}, val_loss={avg_val_loss:.6f}')
         
         # 早停检查
-        if avg_val_loss < best_val_loss:
+        if avg_val_loss < best_val_loss or epoch == 0:
+            # 第一个epoch或者有改善时保存
             best_val_loss = avg_val_loss
             best_epoch = epoch
             patience_counter = 0
             
             # 保存最佳模型
-            best_model_path = save_dir / 'best_model.pt'
-            best_model_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
