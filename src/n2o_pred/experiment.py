@@ -633,7 +633,7 @@ class ExperimentRunner:
                                       val_dataset.daily_sequences[idx]['start_day'] + seq['seq_length'])
             else:
                 # ObsStepRNN: 使用原始的sowdur
-                time_steps = np.array(train_dataset.base_data.sequences[idx]['sowdurs'])
+                time_steps = np.array(val_dataset.sequences[idx]['sowdurs'])
             
             # 获取预测和真实值
             model.eval()

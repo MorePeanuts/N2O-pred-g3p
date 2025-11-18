@@ -114,10 +114,14 @@ class N2OPredictorRNN(nn.Module):
         """初始化模型权重"""
         for name, param in self.named_parameters():
             if 'weight' in name:
-                if 'rnn' in name:
-                    nn.init.orthogonal_(param)
+                if param.dim() >= 2:
+                    if 'rnn' in name:
+                        nn.init.orthogonal_(param)
+                    else:
+                        nn.init.xavier_uniform_(param)
                 else:
-                    nn.init.xavier_uniform_(param)
+                    # 对于一维权重，使用正态分布初始化
+                    nn.init.normal_(param, mean=0, std=0.01)
             elif 'bias' in name:
                 nn.init.zeros_(param)
     

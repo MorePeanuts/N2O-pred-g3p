@@ -370,8 +370,8 @@ def compute_shap_values(
             CATEGORICAL_DYNAMIC_FEATURES
         )
         
-        # 收集梯度
-        model.eval()
+        # 收集梯度（需要在训练模式下进行反向传播）
+        model.train()
         model = model.to(device)
         
         gradients = {name: [] for name in feature_names}
