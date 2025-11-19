@@ -16,8 +16,7 @@ logger = create_logger(__name__)
 
 # 定义字段分组
 NUMERIC_STATIC_FEATURES = ["Clay", "CEC", "BD", "pH", "SOC", "TN"]
-# 注意：Total N amount 在序列数据中保存，但只有RF模型会使用它
-# RNN模型仍然使用前6个特征（不包括Total N amount）
+# 完整的动态数值特征列表（用于序列数据存储）
 NUMERIC_DYNAMIC_FEATURES = ["Temp", "Prec", "ST", "WFPS", "Split N amount", "ferdur", "Total N amount"]
 CATEGORICAL_STATIC_FEATURES = ["crop_class"]
 CATEGORICAL_DYNAMIC_FEATURES = ["fertilization_class", "appl_class"]
@@ -25,7 +24,10 @@ GROUP_VARIABLES = ["No. of obs", "Publication", "control_group", "sowdur"]
 DROP_VARIABLES = ["NH4+-N", "NO3_-N", "MN", "C/N"]
 LABELS = ["Daily fluxes"]
 
-# RF模型专用的特征列表（去掉Split N amount和ferdur，使用Total N amount）
+# 模型专用的特征列表
+# RNN模型专用：使用前6个特征（不包括Total N amount）
+NUMERIC_DYNAMIC_FEATURES_RNN = ["Temp", "Prec", "ST", "WFPS", "Split N amount", "ferdur"]
+# RF模型专用：去掉Split N amount和ferdur，使用Total N amount
 NUMERIC_DYNAMIC_FEATURES_RF = ["Temp", "Prec", "ST", "WFPS", "Total N amount"]
 
 

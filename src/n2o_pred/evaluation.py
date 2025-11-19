@@ -421,13 +421,14 @@ class RNNModelWrapper:
         from .preprocessing import (
             CATEGORICAL_DYNAMIC_FEATURES,
             CATEGORICAL_STATIC_FEATURES,
-            NUMERIC_DYNAMIC_FEATURES,
+            NUMERIC_DYNAMIC_FEATURES_RNN,
             NUMERIC_STATIC_FEATURES,
         )
 
         self.static_numeric_features = NUMERIC_STATIC_FEATURES
         self.static_categorical_features = CATEGORICAL_STATIC_FEATURES
-        self.dynamic_numeric_features = NUMERIC_DYNAMIC_FEATURES
+        # RNN 模型只使用前 6 个动态特征（不包括 Total N amount）
+        self.dynamic_numeric_features = NUMERIC_DYNAMIC_FEATURES_RNN
         self.dynamic_categorical_features = CATEGORICAL_DYNAMIC_FEATURES
 
         # 生成特征名称列表

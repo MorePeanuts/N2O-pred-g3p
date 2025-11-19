@@ -562,7 +562,9 @@ class N2ODatasetForDailyStepRNN(Dataset):
                 if day in obs_map:
                     # 真实测量点
                     idx = obs_map[day]
-                    daily_numeric = list(seq["numeric_dynamic"][idx])
+                    # RNN 只使用前 6 个动态特征（索引 0-5），不包括 Total N amount（索引 6）
+                    # 特征顺序：Temp, Prec, ST, WFPS, Split N amount, ferdur
+                    daily_numeric = list(seq["numeric_dynamic"][idx][:6])
                     daily_categorical = list(seq["categorical_dynamic"][idx])
                     target = seq["targets"][idx]
 
