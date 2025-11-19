@@ -16,3 +16,5 @@ datasets
 **/.DS_Store
 
 outputs/
+input*
+reference*

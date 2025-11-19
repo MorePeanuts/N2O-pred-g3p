@@ -22,6 +22,7 @@ class N2OPredictorRNN(nn.Module):
         num_layers: int = 2,
         rnn_type: Literal["GRU", "LSTM"] = "GRU",
         dropout: float = 0.2,
+        mlp_hidden_dim: int = 64,
     ):
         """
         Args:
@@ -66,12 +67,13 @@ class N2OPredictorRNN(nn.Module):
 
         # 静态特征MLP（生成RNN初始hidden state）
         self.static_mlp = nn.Sequential(
-            nn.Linear(static_dim, hidden_size * 2),
-            nn.LayerNorm(hidden_size * 2),
+            nn.Linear(static_dim, mlp_hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_size * 2, hidden_size * num_layers),
-            nn.Tanh(),
+            nn.Linear(mlp_hidden_dim, mlp_hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_hidden_dim, hidden_size * num_layers),
         )
 
         # 计算动态特征的总维度
@@ -82,9 +84,6 @@ class N2OPredictorRNN(nn.Module):
         # 动态特征投影层
         self.dynamic_projection = nn.Sequential(
             nn.Linear(dynamic_dim, hidden_size),
-            nn.LayerNorm(hidden_size),
-            nn.ReLU(),
-            nn.Dropout(dropout),
         )
 
         # RNN层
@@ -110,7 +109,6 @@ class N2OPredictorRNN(nn.Module):
         # 输出层
         self.output_layer = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
-            nn.LayerNorm(hidden_size // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_size // 2, 1),
