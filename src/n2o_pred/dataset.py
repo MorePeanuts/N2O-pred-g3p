@@ -527,8 +527,16 @@ class N2ODatasetForDailyStepRNN(Dataset):
                     # Prec填充为0（非观测日无降水记录）
                     prec = 0.0
 
-                    # Split N amount: 只在施肥当天非0
-                    split_n = 0.0
+                    # Split N amount: 使用前向填充，保持为"上次施肥量"
+                    if before_days:
+                        before_day = max(before_days)
+                        before_idx = obs_map[before_day]
+                        split_n = seq["numeric_dynamic"][before_idx][4]
+                    else:
+                        # 后向填充
+                        after_day = min(after_days)
+                        after_idx = obs_map[after_day]
+                        split_n = seq["numeric_dynamic"][after_idx][4]
 
                     # ferdur: 距离上次施肥的天数
                     if last_fert_day >= 0:
