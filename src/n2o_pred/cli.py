@@ -226,7 +226,7 @@ def main() -> None:
         "--max-epochs", type=int, default=300, help="最大训练轮次（默认300）"
     )
     parser_train.add_argument(
-        "--batch-size", type=int, default=32, help="批次大小（默认32）"
+        "--batch-size", type=int, default=16, help="批次大小（默认16）"
     )
     parser_train.add_argument(
         "--lr", type=float, default=1e-3, help="学习率（默认0.001）"

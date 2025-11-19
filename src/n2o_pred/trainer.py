@@ -27,9 +27,9 @@ class RNNTrainConfig:
     """RNN训练配置"""
 
     max_epochs: int = 300
-    batch_size: int = 32
+    batch_size: int = 16
     learning_rate: float = 1e-3
-    weight_decay: float = 1e-4
+    weight_decay: float = 5e-5
     patience: int = 30
     gradient_clip: float = 5.0
     device: str = "cuda:0"
@@ -38,8 +38,8 @@ class RNNTrainConfig:
     embedding_dim: int = 12
     hidden_size: int = 128
     num_layers: int = 2
-    rnn_type: str = "GRU"
-    dropout: float = 0.4
+    rnn_type: str = "LSTM"
+    dropout: float = 0.25
 
     def to_dict(self) -> dict:
         """转换为字典"""

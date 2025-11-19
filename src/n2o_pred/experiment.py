@@ -70,7 +70,7 @@ class ExperimentRunner:
         # 设置输出目录
         if output_dir is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_dir = Path(__file__).parents[2] / "outputs" / f"exp_{timestamp}"
+            output_dir = Path(__file__).parents[2] / "outputs" / f"exp_{model_type}_{timestamp}"
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
