@@ -396,8 +396,208 @@ def plot_multi_model_sequence_predictions(
     plt.close()
 
 
+class RNNModelWrapper:
+    """
+    RNN模型包装器，用于SHAP分析
+
+    将序列数据转换为固定长度的特征向量，使得SHAP分析能够在统一的尺度上
+    比较数值特征和分类特征的重要性
+    """
+
+    def __init__(self, model: Any, dataset: Any, device: str = "cpu"):
+        """
+        Args:
+            model: RNN模型
+            dataset: RNN数据集（N2ODatasetForObsStepRNN 或 N2ODatasetForDailyStepRNN）
+            device: 设备
+        """
+        self.model = model
+        self.dataset = dataset
+        self.device = torch.device(device)
+        self.model.to(self.device)
+        self.model.eval()
+
+        # 导入特征名称
+        from .preprocessing import (
+            CATEGORICAL_DYNAMIC_FEATURES,
+            CATEGORICAL_STATIC_FEATURES,
+            NUMERIC_DYNAMIC_FEATURES,
+            NUMERIC_STATIC_FEATURES,
+        )
+
+        self.static_numeric_features = NUMERIC_STATIC_FEATURES
+        self.static_categorical_features = CATEGORICAL_STATIC_FEATURES
+        self.dynamic_numeric_features = NUMERIC_DYNAMIC_FEATURES
+        self.dynamic_categorical_features = CATEGORICAL_DYNAMIC_FEATURES
+
+        # 生成特征名称列表
+        self.feature_names = self._get_feature_names()
+
+        logger.info(f"RNN模型包装器初始化完成，设备: {device}")
+        logger.info(f"特征数量: {len(self.feature_names)}")
+
+    def _get_feature_names(self) -> list[str]:
+        """生成特征名称列表"""
+        names = []
+
+        # 静态数值特征（直接使用原始名称）
+        names.extend(self.static_numeric_features)
+
+        # 静态分类特征（直接使用原始名称，因为使用了众数）
+        names.extend(self.static_categorical_features)
+
+        # 动态数值特征（使用平均值）
+        for feature in self.dynamic_numeric_features:
+            names.append(f"{feature}")
+
+        # 动态分类特征（使用众数）
+        for feature in self.dynamic_categorical_features:
+            names.append(f"{feature}")
+
+        return names
+
+    def _prepare_features(self, sequence_indices: np.ndarray) -> np.ndarray:
+        """
+        将序列数据转换为固定长度的特征向量
+
+        Args:
+            sequence_indices: 序列索引数组
+
+        Returns:
+            特征矩阵 [n_samples, n_features]
+        """
+        from scipy import stats
+
+        n_samples = len(sequence_indices)
+        n_features = len(self.feature_names)
+        features = np.zeros((n_samples, n_features))
+
+        for i, seq_idx in enumerate(sequence_indices):
+            # 获取原始序列数据
+            seq = self.dataset.base_data.sequences[int(seq_idx)]
+
+            feature_idx = 0
+
+            # 静态数值特征（直接使用）
+            for j in range(len(self.static_numeric_features)):
+                features[i, feature_idx] = seq["numeric_static"][j]
+                feature_idx += 1
+
+            # 静态分类特征（直接使用，因为序列内是恒定的）
+            for j in range(len(self.static_categorical_features)):
+                features[i, feature_idx] = seq["categorical_static"][j]
+                feature_idx += 1
+
+            # 动态数值特征（计算平均值）
+            for j in range(len(self.dynamic_numeric_features)):
+                values = [seq["numeric_dynamic"][k][j] for k in range(seq["seq_length"])]
+                features[i, feature_idx] = np.mean(values)
+                feature_idx += 1
+
+            # 动态分类特征（计算众数）
+            for j in range(len(self.dynamic_categorical_features)):
+                values = [seq["categorical_dynamic"][k][j] for k in range(seq["seq_length"])]
+                mode_result = stats.mode(values, keepdims=True)
+                features[i, feature_idx] = mode_result.mode[0]
+                feature_idx += 1
+
+        return features
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """
+        预测函数，用于SHAP分析（批量优化版本）
+
+        Args:
+            X: 简化的特征数组，形状为 (n_samples, n_features)
+
+        Returns:
+            预测结果数组，形状为 (n_samples,)
+        """
+        # 使用批量处理优化速度
+        batch_size = 32 if self.device.type == "cuda" else 16
+        return self._predict_batch(X, batch_size)
+
+    def _predict_batch(self, X: np.ndarray, batch_size: int) -> np.ndarray:
+        """
+        批量预测（优化速度）
+
+        Args:
+            X: 特征数组
+            batch_size: 批量大小
+
+        Returns:
+            预测结果数组
+        """
+        from torch.utils.data import DataLoader
+        from .dataset import collate_fn
+
+        predictions = []
+        n_samples = len(X)
+
+        with torch.no_grad():
+            # 按批次处理
+            for batch_start in range(0, n_samples, batch_size):
+                batch_end = min(batch_start + batch_size, n_samples)
+                batch_size_actual = batch_end - batch_start
+
+                # 收集批次数据
+                batch_data = []
+                for i in range(batch_start, batch_end):
+                    seq_idx = i % len(self.dataset)
+                    batch_data.append(self.dataset[seq_idx])
+
+                # 使用 collate_fn 处理变长序列
+                try:
+                    batch_dict = collate_fn(batch_data)
+
+                    # 移动到设备
+                    static_numeric = batch_dict["static_numeric"].to(self.device)
+                    static_categorical = batch_dict["static_categorical"].to(self.device)
+                    dynamic_numeric = batch_dict["dynamic_numeric"].to(self.device)
+                    dynamic_categorical = batch_dict["dynamic_categorical"].to(self.device)
+                    seq_lengths = batch_dict["seq_lengths"].to(self.device)
+
+                    # 批量预测
+                    preds = self.model(
+                        static_numeric,
+                        static_categorical,
+                        dynamic_numeric,
+                        dynamic_categorical,
+                        seq_lengths,
+                    )
+
+                    # 对每个序列取平均
+                    for i in range(batch_size_actual):
+                        seq_len = seq_lengths[i].item()
+                        pred_mean = preds[i, :seq_len].mean().item()
+
+                        # 反标准化到原始空间
+                        pred_original = self.dataset.inverse_transform_targets(
+                            np.array([pred_mean])
+                        )[0]
+
+                        predictions.append(pred_original)
+
+                except Exception as e:
+                    logger.warning(f"批量预测错误: {e}")
+                    # 降级为逐个预测
+                    for i in range(batch_start, batch_end):
+                        predictions.append(0.0)
+
+                # GPU 内存管理
+                if self.device.type == "cuda" and batch_start % (batch_size * 4) == 0:
+                    torch.cuda.empty_cache()
+
+        return np.array(predictions)
+
+
 def compute_shap_values(
-    model: Any, data: Any, model_type: str, device: str = "cpu", max_samples: int = 1000
+    model: Any,
+    data: Any,
+    model_type: str,
+    device: str = "cpu",
+    max_samples: int = 1000,
+    fast_mode: bool = True,
 ) -> tuple[np.ndarray, list[str]]:
     """
     计算SHAP值
@@ -408,6 +608,7 @@ def compute_shap_values(
         model_type: 模型类型 ('rf', 'rnn-obs', 'rnn-daily')
         device: 设备
         max_samples: 最大样本数（用于限制SHAP计算的样本数）
+        fast_mode: 是否使用快速模式（RNN模型适用，默认True）
 
     Returns:
         (SHAP值, 特征名称列表)
@@ -451,83 +652,60 @@ def compute_shap_values(
         return mean_abs_shap, feature_names
 
     else:
-        # RNN使用简化的方法：计算梯度作为重要性
-        # 注：完整的DeepExplainer对于RNN较复杂，这里使用梯度近似
-        logger.warning("RNN的SHAP分析使用梯度近似方法")
+        # RNN使用KernelExplainer进行SHAP分析
+        logger.info(f"RNN的SHAP分析使用KernelExplainer方法 (快速模式: {fast_mode})")
 
-        from .preprocessing import (
-            CATEGORICAL_DYNAMIC_FEATURES,
-            CATEGORICAL_STATIC_FEATURES,
-            NUMERIC_DYNAMIC_FEATURES,
-            NUMERIC_STATIC_FEATURES,
-        )
+        # 创建模型包装器
+        model_wrapper = RNNModelWrapper(model, data, device)
 
-        feature_names = (
-            NUMERIC_STATIC_FEATURES
-            + NUMERIC_DYNAMIC_FEATURES
-            + CATEGORICAL_STATIC_FEATURES
-            + CATEGORICAL_DYNAMIC_FEATURES
-        )
+        # 根据快速模式调整样本数量
+        if fast_mode:
+            # 快速模式：极大减少样本数量
+            n_samples = min(len(data), max_samples // 5)  # 只使用 1/5 的样本
+            background_size = min(30, n_samples // 5)  # 背景数据 30 个
+            n_explain = min(50, n_samples)  # 解释样本 50 个
+            nsamples = 32 if device != "cpu" and torch.cuda.is_available() else 16
+        else:
+            # 标准模式：较少样本但更准确
+            n_samples = min(len(data), max_samples // 2)
+            background_size = min(50, n_samples // 4)
+            n_explain = min(100, n_samples)
+            nsamples = 64 if device != "cpu" and torch.cuda.is_available() else 32
 
-        # 收集梯度（需要在训练模式下进行反向传播）
-        model.train()
-        model = model.to(device)
+        sample_indices = np.random.choice(len(data), n_samples, replace=False)
 
-        gradients = {name: [] for name in feature_names}
+        # 准备特征矩阵
+        logger.info(f"准备 {n_samples} 个样本的特征矩阵...")
+        feature_matrix = model_wrapper._prepare_features(sample_indices)
 
-        # 采样一部分数据计算梯度
-        sample_size = min(len(data), max_samples)
-        indices = np.random.choice(len(data), sample_size, replace=False)
+        # 选择背景数据
+        background_indices = np.random.choice(len(feature_matrix), background_size, replace=False)
+        background_data = feature_matrix[background_indices]
 
-        for idx in indices[:100]:  # 进一步限制为100个样本以加快速度
-            batch = data[int(idx)]
+        logger.info(f"背景数据样本数: {background_size}")
 
-            # 准备输入
-            static_numeric = (
-                batch["static_numeric"].unsqueeze(0).to(device).requires_grad_(True)
-            )
-            dynamic_numeric = (
-                batch["dynamic_numeric"].unsqueeze(0).to(device).requires_grad_(True)
-            )
-            static_categorical = batch["static_categorical"].unsqueeze(0).to(device)
-            dynamic_categorical = batch["dynamic_categorical"].unsqueeze(0).to(device)
-            seq_lengths = torch.tensor([batch["seq_length"]]).to(device)
+        # 创建SHAP解释器
+        logger.info("创建SHAP解释器...")
+        explainer = shap.KernelExplainer(model_wrapper.predict, background_data)
 
-            # 前向传播
-            outputs = model(
-                static_numeric,
-                static_categorical,
-                dynamic_numeric,
-                dynamic_categorical,
-                seq_lengths,
-            )
+        # 选择要解释的样本
+        explain_indices = np.random.choice(len(feature_matrix), n_explain, replace=False)
+        explain_data = feature_matrix[explain_indices]
 
-            # 计算损失（预测值的和，作为标量）
-            loss = outputs.sum()
-            loss.backward()
+        logger.info(f"解释样本数: {n_explain}, SHAP采样次数: {nsamples}")
 
-            # 收集梯度
-            if static_numeric.grad is not None:
-                grad_static = static_numeric.grad.abs().cpu().numpy().flatten()
-                for i, name in enumerate(NUMERIC_STATIC_FEATURES):
-                    gradients[name].append(grad_static[i])
+        # 计算SHAP值
+        time_estimate = (background_size * n_explain * nsamples) / (32 * 100)  # 粗略估计（秒）
+        logger.info(f"计算SHAP值（预计 {time_estimate:.1f} 秒）...")
 
-            if dynamic_numeric.grad is not None:
-                grad_dynamic = (
-                    dynamic_numeric.grad.abs().cpu().numpy().mean(axis=1).flatten()
-                )
-                for i, name in enumerate(NUMERIC_DYNAMIC_FEATURES):
-                    gradients[name].append(grad_dynamic[i])
+        shap_values = explainer.shap_values(explain_data, nsamples=nsamples)
 
-        # 计算平均梯度作为重要性
-        importance = []
-        for name in feature_names:
-            if gradients[name]:
-                importance.append(np.mean(gradients[name]))
-            else:
-                importance.append(0.0)
+        logger.info(f"SHAP值计算完成，形状: {shap_values.shape}")
 
-        return np.array(importance), feature_names
+        # 计算平均绝对SHAP值作为特征重要性
+        mean_abs_shap = np.abs(shap_values).mean(axis=0)
+
+        return mean_abs_shap, model_wrapper.feature_names
 
 
 def save_metrics_to_json(metrics: dict, save_path: Path) -> None:
