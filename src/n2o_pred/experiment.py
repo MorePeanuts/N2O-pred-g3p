@@ -143,8 +143,6 @@ def _parallel_train_worker(args_tuple):
 
 def _train_rf_worker(train_base, val_base, test_base, config, save_dir, logger):
     """RF training worker - mirrors ExperimentRunner._train_rf logic"""
-    from .preprocessing import LABELS
-
     # Flatten to DataFrame
     train_df = train_base.flatten_to_dataframe_for_rf()
     val_df = val_base.flatten_to_dataframe_for_rf()
@@ -163,7 +161,99 @@ def _train_rf_worker(train_base, val_base, test_base, config, save_dir, logger):
     # Save config
     save_json(config.to_dict(), save_dir / "config.json")
 
-    # Generate outputs (simplified version for parallel execution)
+    # Generate outputs (full version with plots)
+    figs_dir = save_dir / "figs"
+    tables_dir = save_dir / "tables"
+    figs_dir.mkdir(exist_ok=True)
+    tables_dir.mkdir(exist_ok=True)
+
+    # 1. 预测vs实际值图（使用测试集）
+    plot_predictions_vs_actual(
+        train_result["train_predictions"],
+        train_result["train_targets"],
+        train_result["test_predictions"],
+        train_result["test_targets"],
+        figs_dir / "predictions_vs_actual.png",
+    )
+
+    # 2. 特征重要性图
+    plot_feature_importance(
+        list(train_result["feature_importances"].keys()),
+        train_result["feature_importances"],
+        figs_dir / "feature_importance.png",
+    )
+
+    # 3. 保存预测结果到CSV
+    save_predictions_to_csv(
+        train_result["train_predictions"],
+        train_result["train_targets"],
+        tables_dir / "train_predictions.csv",
+    )
+    save_predictions_to_csv(
+        train_result["val_predictions"],
+        train_result["val_targets"],
+        tables_dir / "val_predictions.csv",
+    )
+    save_predictions_to_csv(
+        train_result["test_predictions"],
+        train_result["test_targets"],
+        tables_dir / "test_predictions.csv",
+    )
+
+    # 4. 保存特征重要性到CSV
+    importance_df = pd.DataFrame(
+        {
+            "feature": list(train_result["feature_importances"].keys()),
+            "importance": list(train_result["feature_importances"].values()),
+        }
+    ).sort_values("importance", ascending=False)
+    importance_df.to_csv(tables_dir / "feature_importance.csv", index=False)
+
+    # 5. 序列预测图（使用测试集将DataFrame重构为序列）
+    logger.info("生成序列预测图...")
+    test_df_with_pred = test_df.copy()
+    test_df_with_pred["predicted_daily_fluxes"] = train_result["test_predictions"]
+
+    test_base_reconstructed = BaseN2ODataset.from_dataframe(test_df_with_pred)
+
+    test_preds_by_seq = []
+    test_targets_by_seq = []
+    test_seq_ids = []
+
+    for seq in test_base_reconstructed.sequences:
+        test_preds_by_seq.append(
+            test_df_with_pred[
+                (test_df_with_pred["Publication"] == seq["seq_id"][0])
+                & (test_df_with_pred["control_group"] == seq["seq_id"][1])
+            ]["predicted_daily_fluxes"].values
+        )
+        test_targets_by_seq.append(np.array(seq["targets"]))
+        test_seq_ids.append(tuple(seq["seq_id"]))
+
+    seq_metrics = compute_sequence_metrics(test_preds_by_seq, test_targets_by_seq)
+    seq_metrics["seq_id_tuple"] = test_seq_ids
+
+    good_seq_indices = select_good_sequences(seq_metrics, min_length=15, top_n=5)
+
+    logger.info(f"绘制 {len(good_seq_indices)} 个序列的预测图...")
+    for idx in good_seq_indices:
+        seq = test_base_reconstructed.sequences[idx]
+        seq_id = tuple(seq["seq_id"])
+        time_steps = np.array(seq["sowdurs"])
+        targets = np.array(seq["targets"])
+        predictions = test_preds_by_seq[idx]
+
+        plot_sequence_predictions(
+            seq_id,
+            time_steps,
+            targets,
+            predictions,
+            figs_dir / f"sequence_predictions_{seq_id[0]}_{seq_id[1]}.png",
+            mask=None,
+        )
+
+    logger.info(f"输出已保存到 {save_dir}")
+
     metrics = {
         "train": train_result["train_metrics"],
         "val": train_result["val_metrics"],
@@ -235,6 +325,127 @@ def _train_rnn_obs_worker(train_base, val_base, test_base, config, save_dir, dev
     # Save config and model
     save_json(config.to_dict(), save_dir / "config.json")
     torch.save(model.state_dict(), save_dir / "model.pt")
+
+    # Generate outputs (full version with plots)
+    figs_dir = save_dir / "figs"
+    tables_dir = save_dir / "tables"
+    figs_dir.mkdir(exist_ok=True)
+    tables_dir.mkdir(exist_ok=True)
+
+    # 1. 训练损失曲线
+    plot_train_loss_curve(
+        train_result["train_losses"],
+        train_result["val_losses"],
+        figs_dir / "train_loss_curve.png",
+    )
+
+    # 2. 预测vs实际值图（使用测试集）
+    plot_predictions_vs_actual(
+        train_result["train_predictions"],
+        train_result["train_targets"],
+        train_result["test_predictions"],
+        train_result["test_targets"],
+        figs_dir / "predictions_vs_actual.png",
+    )
+
+    # 3. 保存预测结果到CSV
+    save_predictions_to_csv(
+        train_result["train_predictions"],
+        train_result["train_targets"],
+        tables_dir / "train_predictions.csv",
+    )
+    save_predictions_to_csv(
+        train_result["val_predictions"],
+        train_result["val_targets"],
+        tables_dir / "val_predictions.csv",
+    )
+    save_predictions_to_csv(
+        train_result["test_predictions"],
+        train_result["test_targets"],
+        tables_dir / "test_predictions.csv",
+    )
+
+    # 4. SHAP分析
+    try:
+        logger.info("计算特征重要性（使用梯度近似）...")
+        shap_values, feature_names = compute_shap_values(
+            model, test_dataset, "rnn-obs", device, max_samples=100
+        )
+        plot_feature_importance(
+            feature_names, shap_values, figs_dir / "feature_importance.png"
+        )
+        importance_df = pd.DataFrame(
+            {"feature": feature_names, "importance": shap_values}
+        ).sort_values("importance", ascending=False)
+        importance_df.to_csv(tables_dir / "feature_importance.csv", index=False)
+    except Exception as e:
+        logger.warning(f"SHAP分析失败: {e}")
+
+    # 5. 序列预测图
+    logger.info("生成序列预测图...")
+    test_preds_by_seq = []
+    test_targets_by_seq = []
+    test_seq_ids = []
+
+    for i in range(len(test_dataset)):
+        seq = test_dataset[i]
+        test_seq_ids.append(tuple(test_dataset.processed_sequences[i]["seq_id"]))
+
+        model.eval()
+        with torch.no_grad():
+            static_numeric = seq["static_numeric"].unsqueeze(0).to(device)
+            dynamic_numeric = seq["dynamic_numeric"].unsqueeze(0).to(device)
+            static_categorical = seq["static_categorical"].unsqueeze(0).to(device)
+            dynamic_categorical = seq["dynamic_categorical"].unsqueeze(0).to(device)
+            seq_lengths = torch.tensor([seq["seq_length"]]).to(device)
+
+            pred_scaled = model(
+                static_numeric, static_categorical,
+                dynamic_numeric, dynamic_categorical, seq_lengths,
+            )
+            pred_scaled = pred_scaled.cpu().numpy()[0, : seq["seq_length"]]
+            pred_orig = test_dataset.inverse_transform_targets(pred_scaled)
+
+        target_orig = seq["targets_original"].numpy()
+        test_preds_by_seq.append(pred_orig)
+        test_targets_by_seq.append(target_orig)
+
+    seq_metrics = compute_sequence_metrics(test_preds_by_seq, test_targets_by_seq)
+    seq_metrics["seq_id_tuple"] = test_seq_ids
+
+    good_seq_indices = select_good_sequences(seq_metrics, min_length=15, top_n=5)
+
+    logger.info(f"绘制 {len(good_seq_indices)} 个序列的预测图...")
+    for idx in good_seq_indices:
+        seq = test_dataset.processed_sequences[idx]
+        seq_id = tuple(seq["seq_id"])
+
+        model.eval()
+        with torch.no_grad():
+            seq_data = test_dataset[idx]
+            static_numeric = seq_data["static_numeric"].unsqueeze(0).to(device)
+            dynamic_numeric = seq_data["dynamic_numeric"].unsqueeze(0).to(device)
+            static_categorical = seq_data["static_categorical"].unsqueeze(0).to(device)
+            dynamic_categorical = seq_data["dynamic_categorical"].unsqueeze(0).to(device)
+            seq_lengths = torch.tensor([seq_data["seq_length"]]).to(device)
+
+            pred_scaled = model(
+                static_numeric, static_categorical,
+                dynamic_numeric, dynamic_categorical, seq_lengths,
+            )
+            pred_scaled = pred_scaled.cpu().numpy()[0, : seq["seq_length"]]
+            pred_orig = test_dataset.inverse_transform_targets(pred_scaled)
+
+        target_orig = seq_data["targets_original"].numpy()
+        time_steps = np.array(test_dataset.sequences[idx]["sowdurs"])
+
+        plot_sequence_predictions(
+            seq_id, time_steps, target_orig, pred_orig,
+            figs_dir / f"sequence_predictions_{seq_id[0]}_{seq_id[1]}.png",
+            mask=None,
+        )
+
+    logger.info(f"输出已保存到 {save_dir}")
 
     # Save metrics
     metrics = {
@@ -308,6 +519,135 @@ def _train_rnn_daily_worker(train_base, val_base, test_base, config, save_dir, d
     # Save config and model
     save_json(config.to_dict(), save_dir / "config.json")
     torch.save(model.state_dict(), save_dir / "model.pt")
+
+    # Generate outputs (full version with plots)
+    figs_dir = save_dir / "figs"
+    tables_dir = save_dir / "tables"
+    figs_dir.mkdir(exist_ok=True)
+    tables_dir.mkdir(exist_ok=True)
+
+    # 1. 训练损失曲线
+    plot_train_loss_curve(
+        train_result["train_losses"],
+        train_result["val_losses"],
+        figs_dir / "train_loss_curve.png",
+    )
+
+    # 2. 预测vs实际值图（使用测试集）
+    plot_predictions_vs_actual(
+        train_result["train_predictions"],
+        train_result["train_targets"],
+        train_result["test_predictions"],
+        train_result["test_targets"],
+        figs_dir / "predictions_vs_actual.png",
+    )
+
+    # 3. 保存预测结果到CSV
+    save_predictions_to_csv(
+        train_result["train_predictions"],
+        train_result["train_targets"],
+        tables_dir / "train_predictions.csv",
+    )
+    save_predictions_to_csv(
+        train_result["val_predictions"],
+        train_result["val_targets"],
+        tables_dir / "val_predictions.csv",
+    )
+    save_predictions_to_csv(
+        train_result["test_predictions"],
+        train_result["test_targets"],
+        tables_dir / "test_predictions.csv",
+    )
+
+    # 4. SHAP分析
+    try:
+        logger.info("计算特征重要性（使用梯度近似）...")
+        shap_values, feature_names = compute_shap_values(
+            model, test_dataset, "rnn-daily", device, max_samples=100
+        )
+        plot_feature_importance(
+            feature_names, shap_values, figs_dir / "feature_importance.png"
+        )
+        importance_df = pd.DataFrame(
+            {"feature": feature_names, "importance": shap_values}
+        ).sort_values("importance", ascending=False)
+        importance_df.to_csv(tables_dir / "feature_importance.csv", index=False)
+    except Exception as e:
+        logger.warning(f"SHAP分析失败: {e}")
+
+    # 5. 序列预测图（使用测试集）
+    logger.info("生成序列预测图...")
+    test_preds_by_seq = []
+    test_targets_by_seq = []
+    test_seq_ids = []
+
+    for i in range(len(test_dataset)):
+        seq = test_dataset[i]
+        test_seq_ids.append(tuple(test_dataset.processed_sequences[i]["seq_id"]))
+
+        model.eval()
+        with torch.no_grad():
+            static_numeric = seq["static_numeric"].unsqueeze(0).to(device)
+            dynamic_numeric = seq["dynamic_numeric"].unsqueeze(0).to(device)
+            static_categorical = seq["static_categorical"].unsqueeze(0).to(device)
+            dynamic_categorical = seq["dynamic_categorical"].unsqueeze(0).to(device)
+            seq_lengths = torch.tensor([seq["seq_length"]]).to(device)
+
+            pred_scaled = model(
+                static_numeric, static_categorical,
+                dynamic_numeric, dynamic_categorical, seq_lengths,
+            )
+            pred_scaled = pred_scaled.cpu().numpy()[0, : seq["seq_length"]]
+            pred_orig = test_dataset.inverse_transform_targets(pred_scaled)
+
+        target_orig = seq["targets_original"].numpy()
+
+        # For DailyStepRNN, only keep real measurement points
+        mask = seq["mask"].numpy()
+        test_preds_by_seq.append(pred_orig[mask])
+        test_targets_by_seq.append(target_orig[mask])
+
+    seq_metrics = compute_sequence_metrics(test_preds_by_seq, test_targets_by_seq)
+    seq_metrics["seq_id_tuple"] = test_seq_ids
+
+    good_seq_indices = select_good_sequences(seq_metrics, min_length=15, top_n=5)
+
+    logger.info(f"绘制 {len(good_seq_indices)} 个序列的预测图...")
+    for idx in good_seq_indices:
+        seq = test_dataset.processed_sequences[idx]
+        seq_id = tuple(seq["seq_id"])
+
+        model.eval()
+        with torch.no_grad():
+            seq_data = test_dataset[idx]
+            static_numeric = seq_data["static_numeric"].unsqueeze(0).to(device)
+            dynamic_numeric = seq_data["dynamic_numeric"].unsqueeze(0).to(device)
+            static_categorical = seq_data["static_categorical"].unsqueeze(0).to(device)
+            dynamic_categorical = seq_data["dynamic_categorical"].unsqueeze(0).to(device)
+            seq_lengths = torch.tensor([seq_data["seq_length"]]).to(device)
+
+            pred_scaled = model(
+                static_numeric, static_categorical,
+                dynamic_numeric, dynamic_categorical, seq_lengths,
+            )
+            pred_scaled = pred_scaled.cpu().numpy()[0, : seq["seq_length"]]
+            pred_orig = test_dataset.inverse_transform_targets(pred_scaled)
+
+        target_orig = seq_data["targets_original"].numpy()
+
+        # For DailyStepRNN, only plot real measurement points
+        mask_seq = seq_data["mask"].numpy()
+        time_steps = np.array(test_dataset.sequences[idx]["sowdurs"])
+        pred_orig = pred_orig[mask_seq]
+        target_orig = target_orig[mask_seq]
+
+        plot_sequence_predictions(
+            seq_id, time_steps, target_orig, pred_orig,
+            figs_dir / f"sequence_predictions_{seq_id[0]}_{seq_id[1]}.png",
+            mask=None,
+        )
+
+    logger.info(f"输出已保存到 {save_dir}")
 
     # Save metrics
     metrics = {
@@ -402,7 +742,7 @@ class ExperimentRunner:
         # 存储每个split的结果
         split_results = []
         best_split = None
-        best_metric = -float("inf")  # 使用R2作为最佳指标
+        best_metric = -float("inf")  # 使用测试集R2作为最佳指标
 
         if max_workers == 1:
             # Serial execution (original behavior)
@@ -435,10 +775,10 @@ class ExperimentRunner:
                         }
                     )
 
-                    # 更新最佳split
-                    val_r2 = result["metrics"]["val"]["R2"]
-                    if val_r2 > best_metric:
-                        best_metric = val_r2
+                    # 更新最佳split（使用测试集R2）
+                    test_r2 = result["metrics"]["test"]["R2"]
+                    if test_r2 > best_metric:
+                        best_metric = test_r2
                         best_split = seed
 
                     logger.info(f"Split {seed} 完成")
@@ -484,10 +824,10 @@ class ExperimentRunner:
                         result = future.result()
                         split_results.append(result)
 
-                        # 更新最佳split
-                        val_r2 = result["metrics"]["val"]["R2"]
-                        if val_r2 > best_metric:
-                            best_metric = val_r2
+                        # 更新最佳split（使用测试集R2）
+                        test_r2 = result["metrics"]["test"]["R2"]
+                        if test_r2 > best_metric:
+                            best_metric = test_r2
                             best_split = seed
 
                         logger.info(f"Split {seed} 完成 (并行)")
@@ -503,7 +843,7 @@ class ExperimentRunner:
         # 保存总结
         save_json(summary, self.output_dir / "summary.json")
         logger.info(f"\n实验完成！总结已保存到 {self.output_dir / 'summary.json'}")
-        logger.info(f"最佳split: {best_split} (R2={best_metric:.4f})")
+        logger.info(f"最佳split: {best_split} (测试集R2={best_metric:.4f})")
 
         return summary
 
@@ -1153,7 +1493,7 @@ class ExperimentRunner:
             "model_type": self.model_type,
             "n_splits": len(seeds),
             "seeds": seeds,
-            "best_seed": best_split,  # 最佳split的种子（用于compare命令）
+            "best_seed": best_split,  # 最佳split的种子（基于测试集R2，用于compare命令）
             "best_split_seed": best_split,  # 保持向后兼容
             "config": self.config.to_dict(),
             "metrics_summary": {
