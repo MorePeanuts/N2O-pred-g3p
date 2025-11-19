@@ -88,12 +88,17 @@ def cmd_train(args):
 
     # 运行实验
     if split_seeds is not None:
-        summary = runner.run(split_seeds=split_seeds, train_split=args.train_split)
+        summary = runner.run(
+            split_seeds=split_seeds,
+            train_split=args.train_split,
+            max_workers=args.max_workers,
+        )
     else:
         summary = runner.run(
             total_splits=args.max_split,
             split_seed=args.split_seed,
             train_split=args.train_split,
+            max_workers=args.max_workers,
         )
 
     logger.info("训练完成！")
@@ -218,6 +223,9 @@ def main() -> None:
     )
     parser_train.add_argument(
         "--device", type=str, default="cuda:0", help="设备（默认cuda:0）"
+    )
+    parser_train.add_argument(
+        "--max-workers", type=int, default=1, help="最大并行训练数（默认1，串行）"
     )
     parser_train.add_argument("--output", type=str, help="输出目录")
 

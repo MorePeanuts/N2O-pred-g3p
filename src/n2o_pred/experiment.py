@@ -4,6 +4,7 @@
 
 import json
 import pickle
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,281 @@ from .trainer import (
 from .utils import create_logger, get_device, load_json, save_json, set_seed
 
 logger = create_logger(__name__)
+
+
+def _parallel_train_worker(args_tuple):
+    """
+    Worker function for parallel split training
+
+    This function is designed to be called by ProcessPoolExecutor.
+    It recreates necessary objects in the subprocess and executes training.
+
+    Args:
+        args_tuple: (model_type, config_dict, seed, train_split, output_dir, device)
+
+    Returns:
+        dict with seed and metrics
+    """
+    model_type, config_dict, seed, train_split, output_dir, device = args_tuple
+
+    try:
+        # Create split-specific directory
+        split_dir = Path(output_dir) / f"split_{seed}"
+        split_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create split-specific logger to avoid conflicts
+        split_logger = create_logger(f"split_{seed}", split_dir / "train.log")
+
+        # Set random seed
+        set_seed(seed)
+
+        # Reconstruct config
+        if model_type.startswith("rnn"):
+            config = RNNTrainConfig(**config_dict)
+            config.device = device
+        else:
+            config = RFTrainConfig(**config_dict)
+
+        split_logger.info(f"开始训练 split_seed={seed} on {device}")
+
+        # Load dataset (each worker loads its own copy)
+        base_dataset = BaseN2ODataset()
+
+        # Split data
+        n_sequences = len(base_dataset)
+        indices = list(range(n_sequences))
+
+        test_ratio = (1.0 - train_split) / 2
+        train_val_indices, test_indices = sklearn_split(
+            indices, train_size=1.0-test_ratio, random_state=seed
+        )
+
+        val_ratio = test_ratio / (1.0 - test_ratio)
+        train_indices, val_indices = sklearn_split(
+            train_val_indices, train_size=1.0-val_ratio, random_state=seed
+        )
+
+        split_logger.info(
+            f"数据集划分: {len(train_indices)} 训练, "
+            f"{len(val_indices)} 验证, {len(test_indices)} 测试"
+        )
+
+        train_base = base_dataset[train_indices]
+        val_base = base_dataset[val_indices]
+        test_base = base_dataset[test_indices]
+
+        # Execute training based on model type
+        if model_type == "rf":
+            result = _train_rf_worker(
+                train_base, val_base, test_base, config, split_dir, split_logger
+            )
+        elif model_type == "rnn-obs":
+            result = _train_rnn_obs_worker(
+                train_base, val_base, test_base, config, split_dir, device, split_logger
+            )
+        elif model_type == "rnn-daily":
+            result = _train_rnn_daily_worker(
+                train_base, val_base, test_base, config, split_dir, device, split_logger
+            )
+        else:
+            raise ValueError(f"不支持的模型类型: {model_type}")
+
+        # Clean up GPU memory
+        if device.startswith("cuda"):
+            torch.cuda.empty_cache()
+
+        split_logger.info(f"Split {seed} 完成")
+
+        return {
+            "seed": seed,
+            "metrics": result["metrics"],
+        }
+
+    except Exception as e:
+        split_logger.error(f"Split {seed} 失败: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+
+def _train_rf_worker(train_base, val_base, test_base, config, save_dir, logger):
+    """RF training worker - mirrors ExperimentRunner._train_rf logic"""
+    from .preprocessing import LABELS
+
+    # Flatten to DataFrame
+    train_df = train_base.flatten_to_dataframe_for_rf()
+    val_df = val_base.flatten_to_dataframe_for_rf()
+    test_df = test_base.flatten_to_dataframe_for_rf()
+
+    logger.info(f"训练数据: {len(train_df)} 个样本")
+    logger.info(f"验证数据: {len(val_df)} 个样本")
+    logger.info(f"测试数据: {len(test_df)} 个样本")
+
+    # Train model
+    model, train_result = train_rf_predictor(
+        train_df=train_df, val_df=val_df, test_df=test_df,
+        config=config, save_dir=save_dir
+    )
+
+    # Save config
+    save_json(config.to_dict(), save_dir / "config.json")
+
+    # Generate outputs (simplified version for parallel execution)
+    metrics = {
+        "train": train_result["train_metrics"],
+        "val": train_result["val_metrics"],
+        "test": train_result["test_metrics"],
+        "n_parameters": train_result["n_parameters"],
+    }
+    save_metrics_to_json(metrics, save_dir / "metrics.json")
+
+    return {"metrics": metrics}
+
+
+def _train_rnn_obs_worker(train_base, val_base, test_base, config, save_dir, device, logger):
+    """RNN-Obs training worker"""
+    # Create RNN datasets
+    train_dataset = N2ODatasetForObsStepRNN(train_base, fit_scalers=True)
+    val_dataset = N2ODatasetForObsStepRNN(val_base, fit_scalers=False, scalers=train_dataset.scalers)
+    test_dataset = N2ODatasetForObsStepRNN(test_base, fit_scalers=False, scalers=train_dataset.scalers)
+
+    logger.info(f"训练数据: {len(train_dataset)} 个序列")
+    logger.info(f"验证数据: {len(val_dataset)} 个序列")
+    logger.info(f"测试数据: {len(test_dataset)} 个序列")
+
+    # Save scalers
+    with open(save_dir / "scalers.pkl", "wb") as f:
+        pickle.dump(train_dataset.scalers, f)
+
+    # Create data loaders
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, collate_fn=collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, collate_fn=collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False, collate_fn=collate_fn)
+
+    # Get categorical cardinalities
+    from .preprocessing import CATEGORICAL_STATIC_FEATURES, CATEGORICAL_DYNAMIC_FEATURES
+
+    encoders_path = Path(__file__).parents[2] / "preprocessor" / "encoders.pkl"
+    with open(encoders_path, "rb") as f:
+        encoders = pickle.load(f)
+
+    categorical_static_cardinalities = [len(encoders[feat].classes_) for feat in CATEGORICAL_STATIC_FEATURES]
+    categorical_dynamic_cardinalities = [len(encoders[feat].classes_) for feat in CATEGORICAL_DYNAMIC_FEATURES]
+
+    # Create model
+    model = N2OPredictorRNN(
+        num_numeric_static=6,
+        num_numeric_dynamic=7,  # 原始6个 + time_delta
+        categorical_static_cardinalities=categorical_static_cardinalities,
+        categorical_dynamic_cardinalities=categorical_dynamic_cardinalities,
+        embedding_dim=config.embedding_dim,
+        hidden_size=config.hidden_size,
+        num_layers=config.num_layers,
+        rnn_type=config.rnn_type,
+        dropout=config.dropout,
+    )
+
+    # Train model
+    train_result = train_rnn_predictor(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        test_loader=test_loader,
+        config=config,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        test_dataset=test_dataset,
+        save_dir=save_dir,
+        use_mask=False,
+    )
+
+    # Save config and model
+    save_json(config.to_dict(), save_dir / "config.json")
+    torch.save(model.state_dict(), save_dir / "model.pt")
+
+    # Save metrics
+    metrics = {
+        "train": train_result["train_metrics"],
+        "val": train_result["val_metrics"],
+        "test": train_result["test_metrics"],
+        "n_parameters": train_result["n_parameters"],
+    }
+    save_metrics_to_json(metrics, save_dir / "metrics.json")
+
+    return {"metrics": metrics}
+
+
+def _train_rnn_daily_worker(train_base, val_base, test_base, config, save_dir, device, logger):
+    """RNN-Daily training worker"""
+    # Create RNN datasets
+    train_dataset = N2ODatasetForDailyStepRNN(train_base, fit_scalers=True)
+    val_dataset = N2ODatasetForDailyStepRNN(val_base, fit_scalers=False, scalers=train_dataset.scalers)
+    test_dataset = N2ODatasetForDailyStepRNN(test_base, fit_scalers=False, scalers=train_dataset.scalers)
+
+    logger.info(f"训练数据: {len(train_dataset)} 个序列")
+    logger.info(f"验证数据: {len(val_dataset)} 个序列")
+    logger.info(f"测试数据: {len(test_dataset)} 个序列")
+
+    # Save scalers
+    with open(save_dir / "scalers.pkl", "wb") as f:
+        pickle.dump(train_dataset.scalers, f)
+
+    # Create data loaders
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True, collate_fn=collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, collate_fn=collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False, collate_fn=collate_fn)
+
+    # Get categorical cardinalities
+    from .preprocessing import CATEGORICAL_STATIC_FEATURES, CATEGORICAL_DYNAMIC_FEATURES
+
+    encoders_path = Path(__file__).parents[2] / "preprocessor" / "encoders.pkl"
+    with open(encoders_path, "rb") as f:
+        encoders = pickle.load(f)
+
+    categorical_static_cardinalities = [len(encoders[feat].classes_) for feat in CATEGORICAL_STATIC_FEATURES]
+    categorical_dynamic_cardinalities = [len(encoders[feat].classes_) for feat in CATEGORICAL_DYNAMIC_FEATURES]
+
+    # Create model
+    model = N2OPredictorRNN(
+        num_numeric_static=6,
+        num_numeric_dynamic=6,
+        categorical_static_cardinalities=categorical_static_cardinalities,
+        categorical_dynamic_cardinalities=categorical_dynamic_cardinalities,
+        embedding_dim=config.embedding_dim,
+        hidden_size=config.hidden_size,
+        num_layers=config.num_layers,
+        rnn_type=config.rnn_type,
+        dropout=config.dropout,
+    )
+
+    # Train model
+    train_result = train_rnn_predictor(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        test_loader=test_loader,
+        config=config,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        test_dataset=test_dataset,
+        save_dir=save_dir,
+        use_mask=True,
+    )
+
+    # Save config and model
+    save_json(config.to_dict(), save_dir / "config.json")
+    torch.save(model.state_dict(), save_dir / "model.pt")
+
+    # Save metrics
+    metrics = {
+        "train": train_result["train_metrics"],
+        "val": train_result["val_metrics"],
+        "test": train_result["test_metrics"],
+        "n_parameters": train_result["n_parameters"],
+    }
+    save_metrics_to_json(metrics, save_dir / "metrics.json")
+
+    return {"metrics": metrics}
 
 
 class ExperimentRunner:
@@ -95,6 +371,7 @@ class ExperimentRunner:
         split_seeds: list[int] | None = None,
         split_seed: int = 42,
         train_split: float = 0.9,
+        max_workers: int = 1,
     ) -> dict[str, Any]:
         """
         运行实验
@@ -104,6 +381,7 @@ class ExperimentRunner:
             split_seeds: 指定的种子列表（如果提供，则忽略total_splits和split_seed）
             split_seed: 生成随机种子的种子
             train_split: 训练集比例
+            max_workers: 最大并行worker数（默认1，串行执行）
 
         Returns:
             实验总结
@@ -118,52 +396,106 @@ class ExperimentRunner:
 
         logger.info(f"将运行 {len(seeds)} 个划分")
         logger.info(f"种子列表: {seeds}")
-
-        # 加载基础数据集
-        base_dataset = BaseN2ODataset()
-        logger.info(f"加载数据集，共 {len(base_dataset)} 个序列")
+        if max_workers > 1:
+            logger.info(f"使用 {max_workers} 个并行worker")
 
         # 存储每个split的结果
         split_results = []
         best_split = None
         best_metric = -float("inf")  # 使用R2作为最佳指标
 
-        for seed in seeds:
-            logger.info(f"\n{'=' * 80}")
-            logger.info(f"开始运行 split_seed={seed}")
-            logger.info(f"{'=' * 80}")
+        if max_workers == 1:
+            # Serial execution (original behavior)
+            logger.info("使用串行模式执行")
 
-            split_dir = self.output_dir / f"split_{seed}"
-            split_dir.mkdir(parents=True, exist_ok=True)
+            # 加载基础数据集
+            base_dataset = BaseN2ODataset()
+            logger.info(f"加载数据集，共 {len(base_dataset)} 个序列")
 
-            try:
-                result = self._run_single_split(
-                    base_dataset=base_dataset,
-                    seed=seed,
-                    train_split=train_split,
-                    save_dir=split_dir,
-                )
+            for seed in seeds:
+                logger.info(f"\n{'=' * 80}")
+                logger.info(f"开始运行 split_seed={seed}")
+                logger.info(f"{'=' * 80}")
 
-                split_results.append(
-                    {
-                        "seed": seed,
-                        "metrics": result["metrics"],
-                    }
-                )
+                split_dir = self.output_dir / f"split_{seed}"
+                split_dir.mkdir(parents=True, exist_ok=True)
 
-                # 更新最佳split
-                val_r2 = result["metrics"]["val"]["R2"]
-                if val_r2 > best_metric:
-                    best_metric = val_r2
-                    best_split = seed
+                try:
+                    result = self._run_single_split(
+                        base_dataset=base_dataset,
+                        seed=seed,
+                        train_split=train_split,
+                        save_dir=split_dir,
+                    )
 
-                logger.info(f"Split {seed} 完成")
+                    split_results.append(
+                        {
+                            "seed": seed,
+                            "metrics": result["metrics"],
+                        }
+                    )
 
-            except Exception as e:
-                logger.error(f"Split {seed} 失败: {e}")
-                import traceback
+                    # 更新最佳split
+                    val_r2 = result["metrics"]["val"]["R2"]
+                    if val_r2 > best_metric:
+                        best_metric = val_r2
+                        best_split = seed
 
-                traceback.print_exc()
+                    logger.info(f"Split {seed} 完成")
+
+                except Exception as e:
+                    logger.error(f"Split {seed} 失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+        else:
+            # Parallel execution
+            logger.info("使用并行模式执行")
+
+            # Detect available GPUs
+            num_gpus = torch.cuda.device_count()
+            if num_gpus == 0:
+                logger.warning("未检测到GPU，将使用CPU训练")
+                devices = ["cpu"] * max_workers
+            else:
+                logger.info(f"检测到 {num_gpus} 个GPU")
+                # Round-robin GPU assignment
+                devices = [f"cuda:{i % num_gpus}" for i in range(max_workers)]
+
+            # Prepare tasks
+            config_dict = self.config.to_dict()
+            tasks = [
+                (self.model_type, config_dict, seed, train_split, str(self.output_dir), devices[i % max_workers])
+                for i, seed in enumerate(seeds)
+            ]
+
+            # Execute in parallel
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all tasks
+                future_to_seed = {
+                    executor.submit(_parallel_train_worker, task): task[2]
+                    for task in tasks
+                }
+
+                # Collect results as they complete
+                for future in as_completed(future_to_seed):
+                    seed = future_to_seed[future]
+                    try:
+                        result = future.result()
+                        split_results.append(result)
+
+                        # 更新最佳split
+                        val_r2 = result["metrics"]["val"]["R2"]
+                        if val_r2 > best_metric:
+                            best_metric = val_r2
+                            best_split = seed
+
+                        logger.info(f"Split {seed} 完成 (并行)")
+
+                    except Exception as e:
+                        logger.error(f"Split {seed} 失败: {e}")
+                        import traceback
+                        traceback.print_exc()
 
         # 生成实验总结
         summary = self._generate_summary(split_results, seeds, best_split)
