@@ -167,8 +167,8 @@ class N2OPredictor:
         is_base_dataset = isinstance(data, BaseN2ODataset)
 
         if is_base_dataset:
-            # 如果是BaseN2ODataset，展开为DataFrame
-            data_df = data.flatten_to_dataframe()
+            # 如果是BaseN2ODataset，展开为DataFrame（使用RF专用方法）
+            data_df = data.flatten_to_dataframe_for_rf()
         else:
             data_df = data
 
@@ -406,7 +406,11 @@ def predict_with_model(
         data = BaseN2ODataset(sequences)
         is_sequence_data = True
         # 将序列数据转换为DataFrame以获取定位信息
-        data_df_for_location = data.flatten_to_dataframe()
+        # RF模型使用专用的flatten方法
+        if predictor.model_type == "rf":
+            data_df_for_location = data.flatten_to_dataframe_for_rf()
+        else:
+            data_df_for_location = data.flatten_to_dataframe()
     elif data_path.suffix == ".csv":
         # 假设是DataFrame
         data = pd.read_csv(data_path)

@@ -214,7 +214,7 @@ def main() -> None:
 
     # 训练参数
     parser_train.add_argument(
-        "--train-split", type=float, default=0.9, help="训练集比例（默认0.9）"
+        "--train-split", type=float, default=0.8, help="训练集比例（默认0.8）"
     )
     parser_train.add_argument(
         "--device", type=str, default="cuda:0", help="设备（默认cuda:0）"

@@ -16,12 +16,17 @@ logger = create_logger(__name__)
 
 # 定义字段分组
 NUMERIC_STATIC_FEATURES = ["Clay", "CEC", "BD", "pH", "SOC", "TN"]
-NUMERIC_DYNAMIC_FEATURES = ["Temp", "Prec", "ST", "WFPS", "Split N amount", "ferdur"]
+# 注意：Total N amount 在序列数据中保存，但只有RF模型会使用它
+# RNN模型仍然使用前6个特征（不包括Total N amount）
+NUMERIC_DYNAMIC_FEATURES = ["Temp", "Prec", "ST", "WFPS", "Split N amount", "ferdur", "Total N amount"]
 CATEGORICAL_STATIC_FEATURES = ["crop_class"]
 CATEGORICAL_DYNAMIC_FEATURES = ["fertilization_class", "appl_class"]
 GROUP_VARIABLES = ["No. of obs", "Publication", "control_group", "sowdur"]
 DROP_VARIABLES = ["NH4+-N", "NO3_-N", "MN", "C/N"]
 LABELS = ["Daily fluxes"]
+
+# RF模型专用的特征列表（去掉Split N amount和ferdur，使用Total N amount）
+NUMERIC_DYNAMIC_FEATURES_RF = ["Temp", "Prec", "ST", "WFPS", "Total N amount"]
 
 
 def preprocess_data(
@@ -54,6 +59,8 @@ def preprocess_data(
 
     logger.info(f"从 {raw_data_path} 加载原始数据")
     df = pd.read_csv(raw_data_path, index_col=0)
+    # 将索引转为列（No. of obs）
+    df = df.reset_index()
 
     logger.info(f"原始数据形状: {df.shape}")
 

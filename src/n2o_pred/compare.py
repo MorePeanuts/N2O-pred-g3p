@@ -363,7 +363,7 @@ class ModelComparator:
 
                 # 重构为序列
                 if model_type == "rf":
-                    val_df = val_base.flatten_to_dataframe()
+                    val_df = val_base.flatten_to_dataframe_for_rf()
                     val_df["predicted"] = predictions_flat
                     preds_by_seq = []
                     for seq in val_base.sequences:

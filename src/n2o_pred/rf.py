@@ -14,7 +14,7 @@ from .preprocessing import (
     CATEGORICAL_DYNAMIC_FEATURES,
     CATEGORICAL_STATIC_FEATURES,
     LABELS,
-    NUMERIC_DYNAMIC_FEATURES,
+    NUMERIC_DYNAMIC_FEATURES_RF,
     NUMERIC_STATIC_FEATURES,
 )
 
@@ -69,9 +69,10 @@ class N2OPredictorRF:
             self
         """
         # 准备特征和标签
+        # RF使用专用的动态特征列表（包含Total N amount，不包含Split N amount和ferdur）
         feature_cols = (
             NUMERIC_STATIC_FEATURES
-            + NUMERIC_DYNAMIC_FEATURES
+            + NUMERIC_DYNAMIC_FEATURES_RF
             + CATEGORICAL_STATIC_FEATURES
             + CATEGORICAL_DYNAMIC_FEATURES
         )

@@ -186,63 +186,81 @@ class ExperimentRunner:
         # 设置随机种子
         set_seed(seed)
 
-        # 划分数据集
+        # 划分数据集：train:val:test
+        # train_split 表示训练集占总数据的比例（默认0.8，即80%）
+        # 剩余的 (1-train_split) 平分给验证集和测试集
         n_sequences = len(base_dataset)
         indices = list(range(n_sequences))
-        train_indices, val_indices = sklearn_split(
-            indices, train_size=train_split, random_state=seed
+
+        # 第一步：先分出测试集
+        test_ratio = (1.0 - train_split) / 2  # 例如：(1-0.8)/2 = 0.1 (10%)
+        train_val_indices, test_indices = sklearn_split(
+            indices, train_size=1.0-test_ratio, random_state=seed
         )
 
-        logger.info(f"数据集划分: {len(train_indices)} 训练, {len(val_indices)} 验证")
+        # 第二步：从剩余的数据中分出验证集
+        # 验证集占剩余数据的比例 = test_ratio / (1 - test_ratio)
+        # 例如：0.1 / 0.9 = 1/9，即从90%中分出10%
+        val_ratio = test_ratio / (1.0 - test_ratio)
+        train_indices, val_indices = sklearn_split(
+            train_val_indices, train_size=1.0-val_ratio, random_state=seed
+        )
+
+        logger.info(f"数据集划分: {len(train_indices)} 训练, {len(val_indices)} 验证, {len(test_indices)} 测试")
 
         # 创建子数据集
         train_base = base_dataset[train_indices]
         val_base = base_dataset[val_indices]
+        test_base = base_dataset[test_indices]
 
         # 根据模型类型准备数据和训练
         if self.model_type == "rf":
-            result = self._train_rf(train_base, val_base, save_dir)
+            result = self._train_rf(train_base, val_base, test_base, save_dir)
         elif self.model_type == "rnn-obs":
-            result = self._train_rnn_obs(train_base, val_base, save_dir)
+            result = self._train_rnn_obs(train_base, val_base, test_base, save_dir)
         elif self.model_type == "rnn-daily":
-            result = self._train_rnn_daily(train_base, val_base, save_dir)
+            result = self._train_rnn_daily(train_base, val_base, test_base, save_dir)
         else:
             raise ValueError(f"不支持的模型类型: {self.model_type}")
 
         return result
 
     def _train_rf(
-        self, train_base: BaseN2ODataset, val_base: BaseN2ODataset, save_dir: Path
+        self, train_base: BaseN2ODataset, val_base: BaseN2ODataset, test_base: BaseN2ODataset, save_dir: Path
     ) -> dict[str, Any]:
         """训练随机森林模型"""
-        # 展开数据为DataFrame
-        train_df = train_base.flatten_to_dataframe()
-        val_df = val_base.flatten_to_dataframe()
+        # 展开数据为DataFrame（使用RF专用方法，包含Total N amount，不包含Split N amount和ferdur）
+        train_df = train_base.flatten_to_dataframe_for_rf()
+        val_df = val_base.flatten_to_dataframe_for_rf()
+        test_df = test_base.flatten_to_dataframe_for_rf()
 
         logger.info(f"训练数据: {len(train_df)} 个样本")
         logger.info(f"验证数据: {len(val_df)} 个样本")
+        logger.info(f"测试数据: {len(test_df)} 个样本")
 
-        # 训练模型
+        # 训练模型（在验证集上评估）
         model, train_result = train_rf_predictor(
-            train_df=train_df, val_df=val_df, config=self.config, save_dir=save_dir
+            train_df=train_df, val_df=val_df, test_df=test_df, config=self.config, save_dir=save_dir
         )
 
         # 保存配置
         save_json(self.config.to_dict(), save_dir / "config.json")
 
-        # 生成可视化和表格
+        # 生成可视化和表格（包含测试集）
         self._generate_outputs_rf(
             train_result=train_result,
             model=model,
             train_df=train_df,
             val_df=val_df,
+            test_df=test_df,
             save_dir=save_dir,
         )
 
-        # 返回结果
+        # 返回结果（包含测试集指标）
         metrics = {
             "train": train_result["train_metrics"],
             "val": train_result["val_metrics"],
+            "test": train_result["test_metrics"],
             "n_parameters": train_result["n_parameters"],
         }
 
@@ -255,7 +273,7 @@ class ExperimentRunner:
         }
 
     def _train_rnn_obs(
-        self, train_base: BaseN2ODataset, val_base: BaseN2ODataset, save_dir: Path
+        self, train_base: BaseN2ODataset, val_base: BaseN2ODataset, test_base: BaseN2ODataset, save_dir: Path
     ) -> dict[str, Any]:
         """训练观测步长RNN模型"""
         # 创建RNN数据集
@@ -263,9 +281,13 @@ class ExperimentRunner:
         val_dataset = N2ODatasetForObsStepRNN(
             val_base, fit_scalers=False, scalers=train_dataset.scalers
         )
+        test_dataset = N2ODatasetForObsStepRNN(
+            test_base, fit_scalers=False, scalers=train_dataset.scalers
+        )
 
         logger.info(f"训练数据: {len(train_dataset)} 个序列")
         logger.info(f"验证数据: {len(val_dataset)} 个序列")
+        logger.info(f"测试数据: {len(test_dataset)} 个序列")
 
         # 保存scalers
         with open(save_dir / "scalers.pkl", "wb") as f:
@@ -280,6 +302,12 @@ class ExperimentRunner:
         )
         val_loader = DataLoader(
             val_dataset,
+            batch_size=self.config.batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+        )
+        test_loader = DataLoader(
+            test_dataset,
             batch_size=self.config.batch_size,
             shuffle=False,
             collate_fn=collate_fn,
@@ -318,14 +346,16 @@ class ExperimentRunner:
             dropout=self.config.dropout,
         )
 
-        # 训练模型
+        # 训练模型（在验证集上评估，最后在测试集上测试）
         train_result = train_rnn_predictor(
             model=model,
             train_loader=train_loader,
             val_loader=val_loader,
+            test_loader=test_loader,
             config=self.config,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
+            test_dataset=test_dataset,
             save_dir=save_dir,
             use_mask=False,
         )
@@ -336,20 +366,22 @@ class ExperimentRunner:
         # 保存最终模型
         torch.save(model.state_dict(), save_dir / "model.pt")
 
-        # 生成可视化和表格
+        # 生成可视化和表格（包含测试集）
         self._generate_outputs_rnn(
             train_result=train_result,
             model=model,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
+            test_dataset=test_dataset,
             save_dir=save_dir,
             use_mask=False,
         )
 
-        # 返回结果
+        # 返回结果（包含测试集指标）
         metrics = {
             "train": train_result["train_metrics"],
             "val": train_result["val_metrics"],
+            "test": train_result["test_metrics"],
             "n_parameters": train_result["n_parameters"],
         }
 
@@ -362,7 +394,7 @@ class ExperimentRunner:
         }
 
     def _train_rnn_daily(
-        self, train_base: BaseN2ODataset, val_base: BaseN2ODataset, save_dir: Path
+        self, train_base: BaseN2ODataset, val_base: BaseN2ODataset, test_base: BaseN2ODataset, save_dir: Path
     ) -> dict[str, Any]:
         """训练每日步长RNN模型"""
         # 创建RNN数据集
@@ -370,9 +402,13 @@ class ExperimentRunner:
         val_dataset = N2ODatasetForDailyStepRNN(
             val_base, fit_scalers=False, scalers=train_dataset.scalers
         )
+        test_dataset = N2ODatasetForDailyStepRNN(
+            test_base, fit_scalers=False, scalers=train_dataset.scalers
+        )
 
         logger.info(f"训练数据: {len(train_dataset)} 个序列")
         logger.info(f"验证数据: {len(val_dataset)} 个序列")
+        logger.info(f"测试数据: {len(test_dataset)} 个序列")
 
         # 保存scalers
         with open(save_dir / "scalers.pkl", "wb") as f:
@@ -387,6 +423,12 @@ class ExperimentRunner:
         )
         val_loader = DataLoader(
             val_dataset,
+            batch_size=self.config.batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+        )
+        test_loader = DataLoader(
+            test_dataset,
             batch_size=self.config.batch_size,
             shuffle=False,
             collate_fn=collate_fn,
@@ -421,14 +463,16 @@ class ExperimentRunner:
             dropout=self.config.dropout,
         )
 
-        # 训练模型
+        # 训练模型（在验证集上评估，最后在测试集上测试）
         train_result = train_rnn_predictor(
             model=model,
             train_loader=train_loader,
             val_loader=val_loader,
+            test_loader=test_loader,
             config=self.config,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
+            test_dataset=test_dataset,
             save_dir=save_dir,
             use_mask=True,  # DailyStepRNN使用掩码
         )
@@ -439,20 +483,22 @@ class ExperimentRunner:
         # 保存最终模型
         torch.save(model.state_dict(), save_dir / "model.pt")
 
-        # 生成可视化和表格
+        # 生成可视化和表格（包含测试集）
         self._generate_outputs_rnn(
             train_result=train_result,
             model=model,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
+            test_dataset=test_dataset,
             save_dir=save_dir,
             use_mask=True,
         )
 
-        # 返回结果
+        # 返回结果（包含测试集指标）
         metrics = {
             "train": train_result["train_metrics"],
             "val": train_result["val_metrics"],
+            "test": train_result["test_metrics"],
             "n_parameters": train_result["n_parameters"],
         }
 
@@ -470,6 +516,7 @@ class ExperimentRunner:
         model: Any,
         train_df: pd.DataFrame,
         val_df: pd.DataFrame,
+        test_df: pd.DataFrame,
         save_dir: Path,
     ):
         """生成随机森林模型的输出"""
@@ -478,12 +525,12 @@ class ExperimentRunner:
         figs_dir.mkdir(exist_ok=True)
         tables_dir.mkdir(exist_ok=True)
 
-        # 1. 预测vs实际值图
+        # 1. 预测vs实际值图（使用测试集）
         plot_predictions_vs_actual(
             train_result["train_predictions"],
             train_result["train_targets"],
-            train_result["val_predictions"],
-            train_result["val_targets"],
+            train_result["test_predictions"],
+            train_result["test_targets"],
             figs_dir / "predictions_vs_actual.png",
         )
 
@@ -505,6 +552,11 @@ class ExperimentRunner:
             train_result["val_targets"],
             tables_dir / "val_predictions.csv",
         )
+        save_predictions_to_csv(
+            train_result["test_predictions"],
+            train_result["test_targets"],
+            tables_dir / "test_predictions.csv",
+        )
 
         # 4. 保存特征重要性到CSV
         importance_df = pd.DataFrame(
@@ -515,45 +567,45 @@ class ExperimentRunner:
         ).sort_values("importance", ascending=False)
         importance_df.to_csv(tables_dir / "feature_importance.csv", index=False)
 
-        # 5. 序列预测图（将DataFrame重构为序列）
+        # 5. 序列预测图（使用测试集将DataFrame重构为序列）
         logger.info("生成序列预测图...")
 
-        # 为val_df添加预测值
-        val_df_with_pred = val_df.copy()
-        val_df_with_pred["predicted_daily_fluxes"] = train_result["val_predictions"]
+        # 为test_df添加预测值
+        test_df_with_pred = test_df.copy()
+        test_df_with_pred["predicted_daily_fluxes"] = train_result["test_predictions"]
 
         # 重构为序列
-        val_base_reconstructed = BaseN2ODataset.from_dataframe(val_df_with_pred)
+        test_base_reconstructed = BaseN2ODataset.from_dataframe(test_df_with_pred)
 
         # 收集每个序列的预测和真实值
-        val_preds_by_seq = []
-        val_targets_by_seq = []
-        val_seq_ids = []
+        test_preds_by_seq = []
+        test_targets_by_seq = []
+        test_seq_ids = []
 
-        for seq in val_base_reconstructed.sequences:
-            val_preds_by_seq.append(
-                val_df_with_pred[
-                    (val_df_with_pred["Publication"] == seq["seq_id"][0])
-                    & (val_df_with_pred["control_group"] == seq["seq_id"][1])
+        for seq in test_base_reconstructed.sequences:
+            test_preds_by_seq.append(
+                test_df_with_pred[
+                    (test_df_with_pred["Publication"] == seq["seq_id"][0])
+                    & (test_df_with_pred["control_group"] == seq["seq_id"][1])
                 ]["predicted_daily_fluxes"].values
             )
-            val_targets_by_seq.append(np.array(seq["targets"]))
-            val_seq_ids.append(tuple(seq["seq_id"]))
+            test_targets_by_seq.append(np.array(seq["targets"]))
+            test_seq_ids.append(tuple(seq["seq_id"]))
 
         # 计算每个序列的指标
-        seq_metrics = compute_sequence_metrics(val_preds_by_seq, val_targets_by_seq)
-        seq_metrics["seq_id_tuple"] = val_seq_ids
+        seq_metrics = compute_sequence_metrics(test_preds_by_seq, test_targets_by_seq)
+        seq_metrics["seq_id_tuple"] = test_seq_ids
 
         # 选择好的长序列
         good_seq_indices = select_good_sequences(seq_metrics, min_length=15, top_n=5)
 
         logger.info(f"绘制 {len(good_seq_indices)} 个序列的预测图...")
         for idx in good_seq_indices:
-            seq = val_base_reconstructed.sequences[idx]
+            seq = test_base_reconstructed.sequences[idx]
             seq_id = tuple(seq["seq_id"])
             time_steps = np.array(seq["sowdurs"])
             targets = np.array(seq["targets"])
-            predictions = val_preds_by_seq[idx]
+            predictions = test_preds_by_seq[idx]
 
             plot_sequence_predictions(
                 seq_id,
@@ -572,6 +624,7 @@ class ExperimentRunner:
         model: Any,
         train_dataset: Any,
         val_dataset: Any,
+        test_dataset: Any,
         save_dir: Path,
         use_mask: bool,
     ):
@@ -588,12 +641,12 @@ class ExperimentRunner:
             figs_dir / "train_loss_curve.png",
         )
 
-        # 2. 预测vs实际值图
+        # 2. 预测vs实际值图（使用测试集）
         plot_predictions_vs_actual(
             train_result["train_predictions"],
             train_result["train_targets"],
-            train_result["val_predictions"],
-            train_result["val_targets"],
+            train_result["test_predictions"],
+            train_result["test_targets"],
             figs_dir / "predictions_vs_actual.png",
         )
 
@@ -608,12 +661,17 @@ class ExperimentRunner:
             train_result["val_targets"],
             tables_dir / "val_predictions.csv",
         )
+        save_predictions_to_csv(
+            train_result["test_predictions"],
+            train_result["test_targets"],
+            tables_dir / "test_predictions.csv",
+        )
 
         # 4. SHAP分析（简化版，使用梯度近似）
         try:
             logger.info("计算特征重要性（使用梯度近似）...")
             shap_values, feature_names = compute_shap_values(
-                model, val_dataset, self.model_type, self.device, max_samples=100
+                model, test_dataset, self.model_type, self.device, max_samples=100
             )
 
             plot_feature_importance(
@@ -627,16 +685,16 @@ class ExperimentRunner:
         except Exception as e:
             logger.warning(f"SHAP分析失败: {e}")
 
-        # 5. 序列预测图（选择几个表现好的长序列）
+        # 5. 序列预测图（使用测试集，选择几个表现好的长序列）
         # 收集按序列的预测结果
-        val_preds_by_seq = []
-        val_targets_by_seq = []
-        val_seq_ids = []
-        val_masks = []
+        test_preds_by_seq = []
+        test_targets_by_seq = []
+        test_seq_ids = []
+        test_masks = []
 
-        for i in range(len(val_dataset)):
-            seq = val_dataset[i]
-            val_seq_ids.append(tuple(val_dataset.processed_sequences[i]["seq_id"]))
+        for i in range(len(test_dataset)):
+            seq = test_dataset[i]
+            test_seq_ids.append(tuple(test_dataset.processed_sequences[i]["seq_id"]))
 
             # 获取预测（需要重新推理）
             model.eval()
@@ -659,36 +717,36 @@ class ExperimentRunner:
                     seq_lengths,
                 )
                 pred_scaled = pred_scaled.cpu().numpy()[0, : seq["seq_length"]]
-                pred_orig = val_dataset.inverse_transform_targets(pred_scaled)
+                pred_orig = test_dataset.inverse_transform_targets(pred_scaled)
 
             target_orig = seq["targets_original"].numpy()
 
             if use_mask:
                 mask = seq["mask"].numpy()
-                val_preds_by_seq.append(pred_orig[mask])
-                val_targets_by_seq.append(target_orig[mask])
-                val_masks.append(mask)
+                test_preds_by_seq.append(pred_orig[mask])
+                test_targets_by_seq.append(target_orig[mask])
+                test_masks.append(mask)
             else:
-                val_preds_by_seq.append(pred_orig)
-                val_targets_by_seq.append(target_orig)
-                val_masks.append(None)
+                test_preds_by_seq.append(pred_orig)
+                test_targets_by_seq.append(target_orig)
+                test_masks.append(None)
 
         # 计算每个序列的指标
-        seq_metrics = compute_sequence_metrics(val_preds_by_seq, val_targets_by_seq)
-        seq_metrics["seq_id_tuple"] = val_seq_ids
+        seq_metrics = compute_sequence_metrics(test_preds_by_seq, test_targets_by_seq)
+        seq_metrics["seq_id_tuple"] = test_seq_ids
 
         # 选择好的长序列
         good_seq_indices = select_good_sequences(seq_metrics, min_length=15, top_n=5)
 
         logger.info(f"绘制 {len(good_seq_indices)} 个序列的预测图...")
         for idx in good_seq_indices:
-            seq = val_dataset.processed_sequences[idx]
+            seq = test_dataset.processed_sequences[idx]
             seq_id = tuple(seq["seq_id"])
 
             # 获取预测和真实值
             model.eval()
             with torch.no_grad():
-                seq_data = val_dataset[idx]
+                seq_data = test_dataset[idx]
                 static_numeric = seq_data["static_numeric"].unsqueeze(0).to(self.device)
                 dynamic_numeric = (
                     seq_data["dynamic_numeric"].unsqueeze(0).to(self.device)
@@ -709,7 +767,7 @@ class ExperimentRunner:
                     seq_lengths,
                 )
                 pred_scaled = pred_scaled.cpu().numpy()[0, : seq["seq_length"]]
-                pred_orig = val_dataset.inverse_transform_targets(pred_scaled)
+                pred_orig = test_dataset.inverse_transform_targets(pred_scaled)
 
             target_orig = seq_data["targets_original"].numpy()
 
@@ -717,14 +775,14 @@ class ExperimentRunner:
             if use_mask:
                 mask_seq = seq_data["mask"].numpy()
                 # 使用原始的sowdurs（只取真实测量点）
-                time_steps = np.array(val_dataset.sequences[idx]["sowdurs"])
+                time_steps = np.array(test_dataset.sequences[idx]["sowdurs"])
                 # 只保留真实测量点的数据
                 pred_orig = pred_orig[mask_seq]
                 target_orig = target_orig[mask_seq]
                 mask_for_plot = None  # 不需要在图中区分插值点
             else:
                 # ObsStepRNN: 使用原始的sowdur
-                time_steps = np.array(val_dataset.sequences[idx]["sowdurs"])
+                time_steps = np.array(test_dataset.sequences[idx]["sowdurs"])
                 mask_for_plot = None
 
             plot_sequence_predictions(
@@ -747,6 +805,8 @@ class ExperimentRunner:
         train_rmse_list = []
         val_r2_list = []
         val_rmse_list = []
+        test_r2_list = []
+        test_rmse_list = []
 
         for result in split_results:
             metrics = result["metrics"]
@@ -754,6 +814,8 @@ class ExperimentRunner:
             train_rmse_list.append(metrics["train"]["RMSE"])
             val_r2_list.append(metrics["val"]["R2"])
             val_rmse_list.append(metrics["val"]["RMSE"])
+            test_r2_list.append(metrics["test"]["R2"])
+            test_rmse_list.append(metrics["test"]["RMSE"])
 
         summary = {
             "model_type": self.model_type,
@@ -774,6 +836,12 @@ class ExperimentRunner:
                     "R2_std": float(np.std(val_r2_list)),
                     "RMSE_mean": float(np.mean(val_rmse_list)),
                     "RMSE_std": float(np.std(val_rmse_list)),
+                },
+                "test": {
+                    "R2_mean": float(np.mean(test_r2_list)),
+                    "R2_std": float(np.std(test_r2_list)),
+                    "RMSE_mean": float(np.mean(test_rmse_list)),
+                    "RMSE_std": float(np.std(test_rmse_list)),
                 },
             },
             "split_results": split_results,

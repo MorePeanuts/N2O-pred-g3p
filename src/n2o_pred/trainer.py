@@ -27,7 +27,7 @@ class RNNTrainConfig:
     """RNN训练配置"""
 
     max_epochs: int = 300
-    batch_size: int = 16
+    batch_size: int = 32
     learning_rate: float = 1e-3
     weight_decay: float = 5e-5
     patience: int = 30
@@ -35,11 +35,11 @@ class RNNTrainConfig:
     device: str = "cuda:0"
 
     # 模型参数
-    embedding_dim: int = 12
-    hidden_size: int = 128
-    num_layers: int = 2
-    rnn_type: str = "LSTM"
-    dropout: float = 0.25
+    embedding_dim: int = 32
+    hidden_size: int = 256
+    num_layers: int = 3
+    rnn_type: str = "GRU"
+    dropout: float = 0.3
 
     def to_dict(self) -> dict:
         """转换为字典"""
@@ -88,9 +88,11 @@ def train_rnn_predictor(
     model: N2OPredictorRNN,
     train_loader: DataLoader,
     val_loader: DataLoader,
+    test_loader: DataLoader,
     config: RNNTrainConfig,
     train_dataset: Any,
     val_dataset: Any,
+    test_dataset: Any,
     save_dir: Path,
     use_mask: bool = False,
 ) -> dict[str, Any]:
@@ -100,10 +102,12 @@ def train_rnn_predictor(
     Args:
         model: RNN模型
         train_loader: 训练数据加载器
-        val_loader: 验证数据加载器
+        val_loader: 验证数据加载器（用于训练过程中的评估和早停）
+        test_loader: 测试数据加载器（用于最终评估）
         config: 训练配置
         train_dataset: 训练数据集（用于逆转换）
         val_dataset: 验证数据集（用于逆转换）
+        test_dataset: 测试数据集（用于逆转换）
         save_dir: 保存目录
         use_mask: 是否使用掩码损失（DailyStepRNN为True）
 
@@ -287,13 +291,15 @@ def train_rnn_predictor(
 
     logger.info(f"训练完成，最佳epoch: {best_epoch + 1}")
 
-    # 在训练集和验证集上评估
+    # 在训练集、验证集和测试集上评估
     model.eval()
 
     train_preds_list = []
     train_targets_list = []
     val_preds_list = []
     val_targets_list = []
+    test_preds_list = []
+    test_targets_list = []
 
     with torch.no_grad():
         # 训练集
@@ -366,20 +372,60 @@ def train_rnn_predictor(
                     val_preds_list.extend(pred_orig)
                     val_targets_list.extend(target_orig)
 
+        # 测试集
+        for batch in test_loader:
+            static_numeric = batch["static_numeric"].to(device)
+            dynamic_numeric = batch["dynamic_numeric"].to(device)
+            static_categorical = batch["static_categorical"].to(device)
+            dynamic_categorical = batch["dynamic_categorical"].to(device)
+            seq_lengths = batch["seq_lengths"].to(device)
+            targets_original = batch["targets_original"]
+
+            predictions = model(
+                static_numeric,
+                static_categorical,
+                dynamic_numeric,
+                dynamic_categorical,
+                seq_lengths,
+            )
+
+            predictions_np = predictions.cpu().numpy()
+
+            for i in range(len(seq_lengths)):
+                seq_len = seq_lengths[i].item()
+                pred_scaled = predictions_np[i, :seq_len]
+                target_orig = targets_original[i, :seq_len].numpy()
+
+                pred_orig = test_dataset.inverse_transform_targets(pred_scaled)
+
+                if use_mask:
+                    mask_i = batch["mask"][i, :seq_len].numpy()
+                    test_preds_list.extend(pred_orig[mask_i])
+                    test_targets_list.extend(target_orig[mask_i])
+                else:
+                    test_preds_list.extend(pred_orig)
+                    test_targets_list.extend(target_orig)
+
     train_preds = np.array(train_preds_list)
     train_targets = np.array(train_targets_list)
     val_preds = np.array(val_preds_list)
     val_targets = np.array(val_targets_list)
+    test_preds = np.array(test_preds_list)
+    test_targets = np.array(test_targets_list)
 
     # 计算指标
     train_metrics = compute_metrics(train_targets, train_preds)
     val_metrics = compute_metrics(val_targets, val_preds)
+    test_metrics = compute_metrics(test_targets, test_preds)
 
     logger.info(
         f"训练集 - R2: {train_metrics['R2']:.4f}, RMSE: {train_metrics['RMSE']:.4f}"
     )
     logger.info(
         f"验证集 - R2: {val_metrics['R2']:.4f}, RMSE: {val_metrics['RMSE']:.4f}"
+    )
+    logger.info(
+        f"测试集 - R2: {test_metrics['R2']:.4f}, RMSE: {test_metrics['RMSE']:.4f}"
     )
 
     results = {
@@ -388,10 +434,13 @@ def train_rnn_predictor(
         "best_epoch": best_epoch,
         "train_predictions": train_preds,
         "val_predictions": val_preds,
+        "test_predictions": test_preds,
         "train_targets": train_targets,
         "val_targets": val_targets,
+        "test_targets": test_targets,
         "train_metrics": train_metrics,
         "val_metrics": val_metrics,
+        "test_metrics": test_metrics,
         "n_parameters": model.count_parameters(),
     }
 
@@ -402,10 +451,10 @@ def train_rnn_predictor(
 class RFTrainConfig:
     """随机森林训练配置"""
 
-    n_estimators: int = 100
+    n_estimators: int = 1000
     max_depth: int | None = None
-    min_samples_split: int = 2
-    min_samples_leaf: int = 1
+    min_samples_split: int = 10
+    min_samples_leaf: int = 5
     max_features: str = "sqrt"
     random_state: int = 42
     n_jobs: int = -1
@@ -424,7 +473,7 @@ class RFTrainConfig:
 
 
 def train_rf_predictor(
-    train_df: pd.DataFrame, val_df: pd.DataFrame, config: RFTrainConfig, save_dir: Path
+    train_df: pd.DataFrame, val_df: pd.DataFrame, test_df: pd.DataFrame, config: RFTrainConfig, save_dir: Path
 ) -> tuple[N2OPredictorRF, dict[str, Any]]:
     """
     训练随机森林模型
@@ -432,6 +481,7 @@ def train_rf_predictor(
     Args:
         train_df: 训练数据
         val_df: 验证数据
+        test_df: 测试数据
         config: 训练配置
         save_dir: 保存目录
 
@@ -458,21 +508,27 @@ def train_rf_predictor(
     # 预测
     train_preds = model.predict(train_df)
     val_preds = model.predict(val_df)
+    test_preds = model.predict(test_df)
 
     from .preprocessing import LABELS
 
     train_targets = train_df[LABELS[0]].values
     val_targets = val_df[LABELS[0]].values
+    test_targets = test_df[LABELS[0]].values
 
     # 计算指标
     train_metrics = compute_metrics(train_targets, train_preds)
     val_metrics = compute_metrics(val_targets, val_preds)
+    test_metrics = compute_metrics(test_targets, test_preds)
 
     logger.info(
         f"训练集 - R2: {train_metrics['R2']:.4f}, RMSE: {train_metrics['RMSE']:.4f}"
     )
     logger.info(
         f"验证集 - R2: {val_metrics['R2']:.4f}, RMSE: {val_metrics['RMSE']:.4f}"
+    )
+    logger.info(
+        f"测试集 - R2: {test_metrics['R2']:.4f}, RMSE: {test_metrics['RMSE']:.4f}"
     )
 
     # 保存模型
@@ -487,10 +543,13 @@ def train_rf_predictor(
     results = {
         "train_predictions": train_preds,
         "val_predictions": val_preds,
+        "test_predictions": test_preds,
         "train_targets": train_targets,
         "val_targets": val_targets,
+        "test_targets": test_targets,
         "train_metrics": train_metrics,
         "val_metrics": val_metrics,
+        "test_metrics": test_metrics,
         "feature_importances": feature_importances,
         "n_parameters": model.count_parameters(),
     }

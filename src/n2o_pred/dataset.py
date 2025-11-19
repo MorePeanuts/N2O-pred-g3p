@@ -99,6 +99,61 @@ class BaseN2ODataset(Dataset):
 
         return pd.DataFrame(rows)
 
+    def flatten_to_dataframe_for_rf(self) -> pd.DataFrame:
+        """
+        将序列数据展开为DataFrame格式，专门供随机森林使用
+
+        与 flatten_to_dataframe() 的区别：
+        - 使用 Total N amount（索引6）而不是 Split N amount（索引4）和 ferdur（索引5）
+
+        Returns:
+            展开后的DataFrame，每行对应一个观测点
+        """
+        from .preprocessing import NUMERIC_DYNAMIC_FEATURES_RF
+
+        rows = []
+
+        for seq in self.sequences:
+            seq_length = seq["seq_length"]
+
+            for i in range(seq_length):
+                row = {}
+
+                # 添加ID信息
+                row["No. of obs"] = seq["No. of obs"][i]
+                row["Publication"] = seq["seq_id"][0]
+                row["control_group"] = seq["seq_id"][1]
+                row["sowdur"] = seq["sowdurs"][i]
+
+                # 添加静态数值特征
+                for j, feat_name in enumerate(NUMERIC_STATIC_FEATURES):
+                    row[feat_name] = seq["numeric_static"][j]
+
+                # 添加动态数值特征（RF专用）
+                # 索引映射：0=Temp, 1=Prec, 2=ST, 3=WFPS, 4=Split N amount, 5=ferdur, 6=Total N amount
+                dynamic_feat = seq["numeric_dynamic"][i]
+                row["Temp"] = dynamic_feat[0]
+                row["Prec"] = dynamic_feat[1]
+                row["ST"] = dynamic_feat[2]
+                row["WFPS"] = dynamic_feat[3]
+                row["Total N amount"] = dynamic_feat[6]  # 使用Total N amount而不是Split N amount和ferdur
+
+                # 添加静态分类特征
+                for j, feat_name in enumerate(CATEGORICAL_STATIC_FEATURES):
+                    row[feat_name] = seq["categorical_static"][j]
+
+                # 添加动态分类特征
+                for j, feat_name in enumerate(CATEGORICAL_DYNAMIC_FEATURES):
+                    row[feat_name] = seq["categorical_dynamic"][i][j]
+
+                # 添加目标值（如果存在）
+                if "targets" in seq:
+                    row["Daily fluxes"] = seq["targets"][i]
+
+                rows.append(row)
+
+        return pd.DataFrame(rows)
+
     @staticmethod
     def from_dataframe(df: pd.DataFrame) -> "BaseN2ODataset":
         """
@@ -110,8 +165,18 @@ class BaseN2ODataset(Dataset):
         Returns:
             BaseN2ODataset实例
         """
+        from .preprocessing import NUMERIC_DYNAMIC_FEATURES_RF
+
         # 按(Publication, control_group)分组，并按sowdur排序
         df = df.sort_values(["Publication", "control_group", "sowdur"])
+
+        # 检测 DataFrame 是来自 RF 还是 RNN
+        # RF 的 DataFrame 不包含 'Split N amount' 和 'ferdur'，但包含 'Total N amount'
+        is_rf_dataframe = (
+            "Total N amount" in df.columns
+            and "Split N amount" not in df.columns
+            and "ferdur" not in df.columns
+        )
 
         sequences = []
         for (pub, ctrl_grp), group_df in df.groupby(
@@ -125,10 +190,30 @@ class BaseN2ODataset(Dataset):
             ]
 
             # 提取动态数值特征
-            numeric_dynamic = [
-                [group_df.iloc[i][feat] for feat in NUMERIC_DYNAMIC_FEATURES]
-                for i in range(seq_length)
-            ]
+            if is_rf_dataframe:
+                # RF DataFrame: 需要将5个特征扩展为7个特征
+                # RF特征: Temp, Prec, ST, WFPS, Total N amount
+                # 完整特征: Temp, Prec, ST, WFPS, Split N amount, ferdur, Total N amount
+                numeric_dynamic = []
+                for i in range(seq_length):
+                    row = group_df.iloc[i]
+                    # 按照 NUMERIC_DYNAMIC_FEATURES 的顺序构建完整的特征列表
+                    full_features = [
+                        row["Temp"],           # 索引 0
+                        row["Prec"],           # 索引 1
+                        row["ST"],             # 索引 2
+                        row["WFPS"],           # 索引 3
+                        0.0,                   # 索引 4: Split N amount (RF不使用，填0)
+                        0.0,                   # 索引 5: ferdur (RF不使用，填0)
+                        row["Total N amount"], # 索引 6
+                    ]
+                    numeric_dynamic.append(full_features)
+            else:
+                # RNN DataFrame 或完整的 DataFrame
+                numeric_dynamic = [
+                    [group_df.iloc[i][feat] for feat in NUMERIC_DYNAMIC_FEATURES]
+                    for i in range(seq_length)
+                ]
 
             # 提取静态分类特征
             categorical_static = [
@@ -230,9 +315,15 @@ class N2ODatasetForObsStepRNN(Dataset):
             all_soc.extend([soc] * seq_len)
             all_tn.extend([tn] * seq_len)
 
-            # 动态数值特征
+            # 动态数值特征（RNN只使用前6个，索引0-5）
             for i in range(seq_len):
-                temp, prec, st, wfps, split_n, ferdur = seq["numeric_dynamic"][i]
+                dynamic_feat = seq["numeric_dynamic"][i]
+                temp = dynamic_feat[0]  # Temp
+                prec = dynamic_feat[1]  # Prec
+                st = dynamic_feat[2]    # ST
+                wfps = dynamic_feat[3]  # WFPS
+                split_n = dynamic_feat[4]  # Split N amount
+                ferdur = dynamic_feat[5]   # ferdur
                 all_temp.append(temp)
                 all_prec.append(prec)
                 all_st.append(st)
@@ -316,10 +407,16 @@ class N2ODatasetForObsStepRNN(Dataset):
             static_numeric.append(self.scalers["soc_scaler"].transform([[soc]])[0, 0])
             static_numeric.append(self.scalers["tn_scaler"].transform([[tn]])[0, 0])
 
-            # 处理动态数值特征
+            # 处理动态数值特征（RNN只使用前6个，索引0-5）
             dynamic_numeric = []
             for i in range(seq_len):
-                temp, prec, st, wfps, split_n, ferdur = seq["numeric_dynamic"][i]
+                dynamic_feat = seq["numeric_dynamic"][i]
+                temp = dynamic_feat[0]  # Temp
+                prec = dynamic_feat[1]  # Prec
+                st = dynamic_feat[2]    # ST
+                wfps = dynamic_feat[3]  # WFPS
+                split_n = dynamic_feat[4]  # Split N amount
+                ferdur = dynamic_feat[5]   # ferdur
 
                 feat = []
                 feat.append(self.scalers["temp_scaler"].transform([[temp]])[0, 0])
@@ -618,8 +715,14 @@ class N2ODatasetForDailyStepRNN(Dataset):
                     all_soc.append(soc)
                     all_tn.append(tn)
 
-                    # 动态特征
-                    temp, prec, st, wfps, split_n, ferdur = seq["daily_numeric"][i]
+                    # 动态特征（RNN只使用前6个，索引0-5）
+                    daily_feat = seq["daily_numeric"][i]
+                    temp = daily_feat[0]  # Temp
+                    prec = daily_feat[1]  # Prec
+                    st = daily_feat[2]    # ST
+                    wfps = daily_feat[3]  # WFPS
+                    split_n = daily_feat[4]  # Split N amount
+                    ferdur = daily_feat[5]   # ferdur
                     all_temp.append(temp)
                     all_prec.append(prec)
                     all_st.append(st)
@@ -693,10 +796,16 @@ class N2ODatasetForDailyStepRNN(Dataset):
             static_numeric.append(self.scalers["soc_scaler"].transform([[soc]])[0, 0])
             static_numeric.append(self.scalers["tn_scaler"].transform([[tn]])[0, 0])
 
-            # 处理动态数值特征
+            # 处理动态数值特征（RNN只使用前6个，索引0-5）
             dynamic_numeric = []
             for i in range(seq["total_days"]):
-                temp, prec, st, wfps, split_n, ferdur = seq["daily_numeric"][i]
+                daily_feat = seq["daily_numeric"][i]
+                temp = daily_feat[0]  # Temp
+                prec = daily_feat[1]  # Prec
+                st = daily_feat[2]    # ST
+                wfps = daily_feat[3]  # WFPS
+                split_n = daily_feat[4]  # Split N amount
+                ferdur = daily_feat[5]   # ferdur
 
                 feat = []
                 feat.append(self.scalers["temp_scaler"].transform([[temp]])[0, 0])
