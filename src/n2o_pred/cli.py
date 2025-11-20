@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .compare import compare_experiments
 from .experiment import ExperimentRunner
-from .predict import predict_with_model
+from .predict import predict_tif_data, predict_with_model
 from .preprocessing import preprocess_data
 from .trainer import RFTrainConfig, RNNTrainConfig
 from .utils import create_logger, load_json
@@ -137,27 +137,50 @@ def cmd_predict(args):
 
     data_path = Path(args.dataset)
     if not data_path.exists():
-        logger.error(f"数据文件不存在: {data_path}")
+        logger.error(f"数据路径不存在: {data_path}")
         sys.exit(1)
 
-    output_path = args.output if args.output else None
+    # 检查是否为TIF目录（包含TIF文件的目录）
+    is_tif_dir = data_path.is_dir() and any(data_path.glob("*.tif"))
 
-    logger.info(f"使用模型 {model_dir} 进行预测...")
+    if is_tif_dir:
+        # TIF格式数据预测
+        output_dir = args.output if args.output else f"predictions_{data_path.name}"
 
-    results = predict_with_model(
-        model_dir=model_dir,
-        data_path=data_path,
-        output_path=output_path,
-        device=args.device,
-    )
+        logger.info(f"检测到TIF目录，使用模型 {model_dir} 对 {data_path} 进行预测...")
 
-    logger.info("预测完成！")
-    if results["metrics"]:
-        logger.info(
-            f"评估指标: R2={results['metrics']['R2']:.4f}, "
-            f"RMSE={results['metrics']['RMSE']:.4f}, "
-            f"MAE={results['metrics']['MAE']:.4f}"
+        results = predict_tif_data(
+            model_dir=model_dir,
+            tif_dir=data_path,
+            output_dir=output_dir,
+            device=args.device,
+            batch_size=args.batch_size,
         )
+
+        logger.info("预测完成！")
+        logger.info(f"生成文件数: {len(results['completed_files'])}")
+        logger.info(f"总处理像素数: {results['total_pixels_processed']}")
+        logger.info(f"输出目录: {results['output_dir']}")
+    else:
+        # 常规数据预测
+        output_path = args.output if args.output else None
+
+        logger.info(f"使用模型 {model_dir} 进行预测...")
+
+        results = predict_with_model(
+            model_dir=model_dir,
+            data_path=data_path,
+            output_path=output_path,
+            device=args.device,
+        )
+
+        logger.info("预测完成！")
+        if results["metrics"]:
+            logger.info(
+                f"评估指标: R2={results['metrics']['R2']:.4f}, "
+                f"RMSE={results['metrics']['RMSE']:.4f}, "
+                f"MAE={results['metrics']['MAE']:.4f}"
+            )
 
 
 def main() -> None:
@@ -181,9 +204,12 @@ def main() -> None:
   
   # 比较模型
   n2o-pred compare --models outputs/exp_1 outputs/exp_2 outputs/exp_3
-  
-  # 预测
+
+  # 预测（常规数据）
   n2o-pred predict --model outputs/exp_xxx/split_42 --dataset datasets/data_EUR_processed.pkl
+
+  # 预测（TIF格式数据）
+  n2o-pred predict --model outputs/exp_xxx/split_42 --dataset input_2020 --output predictions/
         """,
     )
 
@@ -262,10 +288,13 @@ def main() -> None:
     # ===== predict 命令 =====
     parser_predict = subparsers.add_parser("predict", help="预测")
     parser_predict.add_argument("--model", type=str, required=True, help="模型目录")
-    parser_predict.add_argument("--dataset", type=str, required=True, help="数据路径")
-    parser_predict.add_argument("--output", type=str, help="输出路径")
+    parser_predict.add_argument("--dataset", type=str, required=True, help="数据路径（文件或TIF目录）")
+    parser_predict.add_argument("--output", type=str, help="输出路径或目录")
     parser_predict.add_argument(
-        "--device", type=str, default="cpu", help="设备（默认cpu）"
+        "--device", type=str, default="cuda:0", help="设备（默认cuda:0）"
+    )
+    parser_predict.add_argument(
+        "--batch-size", type=int, default=256, help="批次大小（TIF预测用，默认256）"
     )
     parser_predict.set_defaults(func=cmd_predict)
 

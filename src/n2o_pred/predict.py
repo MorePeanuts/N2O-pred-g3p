@@ -3,6 +3,7 @@
 """
 
 import pickle
+import time
 from pathlib import Path
 from typing import Any
 
@@ -10,11 +11,13 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from .dataset import (
     BaseN2ODataset,
     N2ODatasetForDailyStepRNN,
     N2ODatasetForObsStepRNN,
+    TifDataLoader,
     collate_fn,
 )
 from .evaluation import compute_metrics, save_predictions_to_csv
@@ -479,5 +482,176 @@ def predict_with_model(
 
         pred_df.to_csv(metrics_output, index=False)
         logger.info(f"预测结果摘要已保存到 {metrics_output}")
+
+    return results
+
+
+def predict_tif_data(
+    model_dir: Path | str,
+    tif_dir: Path | str,
+    output_dir: Path | str,
+    device: str = "cuda:0",
+    batch_size: int = 256,
+) -> dict[str, Any]:
+    """
+    使用训练好的RNN模型对TIF格式数据进行预测
+
+    Args:
+        model_dir: 模型目录
+        tif_dir: TIF数据目录（如 input_2020）
+        output_dir: 输出目录
+        device: 设备
+        batch_size: 批次大小
+
+    Returns:
+        预测结果摘要
+    """
+    model_dir = Path(model_dir)
+    tif_dir = Path(tif_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 加载预测器
+    predictor = N2OPredictor(model_dir)
+
+    # 检查模型类型
+    if not predictor.model_type.startswith("rnn"):
+        raise ValueError(f"TIF预测只支持RNN模型，当前模型类型: {predictor.model_type}")
+
+    # 加载TIF数据
+    logger.info(f"从 {tif_dir} 加载TIF数据...")
+    tif_loader = TifDataLoader(tif_dir)
+
+    # 获取所有有效组合
+    combinations = tif_loader.get_prediction_combinations()
+    logger.info(f"共 {len(combinations)} 个有效组合")
+
+    # 准备设备
+    device_obj = torch.device(device)
+    predictor.model = predictor.model.to(device_obj)
+    predictor.model.eval()
+
+    # 记录结果
+    results = {
+        "model_dir": str(model_dir),
+        "tif_dir": str(tif_dir),
+        "output_dir": str(output_dir),
+        "total_combinations": len(combinations),
+        "completed_files": [],
+        "total_pixels_processed": 0,
+    }
+
+    # 记录总开始时间
+    total_start_time = time.time()
+
+    # 遍历所有组合进行预测
+    progress_bar = tqdm(combinations, desc="预测进度")
+    for idx, (crop, fert, appl) in enumerate(progress_bar, 1):
+        combination_name = f"{crop}_{fert}_{appl}"
+        combination_start_time = time.time()
+
+        # 更新进度条描述
+        progress_bar.set_description(f"预测 [{idx}/{len(combinations)}] {combination_name}")
+
+        # 创建数据集
+        logger.info(f"[{idx}/{len(combinations)}] 正在加载 {combination_name} 数据...")
+        dataset_start_time = time.time()
+        dataset = tif_loader.create_rnn_dataset(
+            crop, fert, appl, predictor.scalers
+        )
+        dataset_load_time = time.time() - dataset_start_time
+
+        if len(dataset) == 0:
+            logger.warning(f"跳过空数据集: {combination_name}")
+            continue
+
+        n_pixels = len(dataset)
+        logger.info(f"  数据加载完成: {n_pixels} 像素, 耗时 {dataset_load_time:.1f}s")
+
+        # 创建数据加载器
+        loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=0,
+        )
+
+        # 计算批次数量
+        n_batches = (n_pixels + batch_size - 1) // batch_size
+        logger.info(f"  共 {n_batches} 个批次 (batch_size={batch_size})")
+
+        # 预测
+        all_predictions = []
+
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(loader, 1):
+                if batch_idx % 10 == 0 or batch_idx == n_batches:
+                    logger.info(f"  批次进度: {batch_idx}/{n_batches}")
+                static_numeric = batch["static_numeric"].to(device_obj)
+                dynamic_numeric = batch["dynamic_numeric"].to(device_obj)
+                static_categorical = batch["static_categorical"].to(device_obj)
+                dynamic_categorical = batch["dynamic_categorical"].to(device_obj)
+
+                # TIF数据集所有样本的序列长度相同
+                seq_len = dataset.n_days
+                batch_size_actual = len(static_numeric)
+                seq_lengths = torch.tensor(
+                    [seq_len] * batch_size_actual, device=device_obj
+                )
+
+                predictions = predictor.model(
+                    static_numeric,
+                    static_categorical,
+                    dynamic_numeric,
+                    dynamic_categorical,
+                    seq_lengths,
+                )
+
+                predictions_np = predictions.cpu().numpy()
+
+                # 逆转换每个像素的预测值
+                for i in range(len(predictions_np)):
+                    pred_scaled = predictions_np[i, :seq_len]
+                    pred_orig = dataset.inverse_transform_targets(pred_scaled)
+                    all_predictions.append(pred_orig)
+
+        # 转换为数组
+        predictions_array = np.array(all_predictions)  # shape: (n_pixels, n_days)
+
+        # 获取像素索引
+        pixel_indices = dataset.get_pixel_indices()
+
+        # 保存预测结果
+        output_path = tif_loader.save_predictions(
+            predictions_array,
+            pixel_indices,
+            crop,
+            fert,
+            appl,
+            output_dir,
+        )
+
+        results["completed_files"].append(str(output_path))
+        results["total_pixels_processed"] += len(pixel_indices)
+
+        # 计算用时
+        combination_time = time.time() - combination_start_time
+
+        # 显示详细信息
+        logger.info(
+            f"[{idx}/{len(combinations)}] {combination_name}: "
+            f"{n_pixels} 像素, 耗时 {combination_time:.1f}s, "
+            f"累计 {results['total_pixels_processed']} 像素"
+        )
+
+    # 计算总用时
+    total_time = time.time() - total_start_time
+    avg_time_per_combination = total_time / len(results['completed_files']) if results['completed_files'] else 0
+
+    logger.info(f"\n预测完成！")
+    logger.info(f"  生成文件数: {len(results['completed_files'])}")
+    logger.info(f"  总处理像素数: {results['total_pixels_processed']}")
+    logger.info(f"  总耗时: {total_time:.1f}s ({total_time/60:.1f}min)")
+    logger.info(f"  平均每组合: {avg_time_per_combination:.1f}s")
 
     return results

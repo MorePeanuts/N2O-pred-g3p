@@ -941,3 +941,425 @@ def collate_fn(batch: list[dict]) -> dict[str, torch.Tensor]:
         result["mask"] = mask
 
     return result
+
+
+class TifDataLoader:
+    """TIF格式数据加载器，用于在TIF和RNN输入格式之间转换"""
+
+    # 作物目录名到编码器类别名的映射
+    DIR_TO_CROP = {
+        "barley": "barley",
+        "fruit": "fruit",
+        "legume": "legume",
+        "maize": "maize",
+        "oilplant": "oilplant",
+        "other_cereal": "other_cereal",
+        "potato": "potato",
+        "rice": "rice",
+        "sugar": "sugarbeet",  # 特殊映射
+        "vegetables": "vegetables",
+        "wheat": "wheat",
+    }
+
+    # 排除的分类值（无施肥情况）
+    EXCLUDED_FERT = ["NO"]  # fertilization_class 中排除
+    EXCLUDED_APPL = ["no"]  # appl_class 中排除
+
+    def __init__(
+        self,
+        input_dir: Path | str,
+        encoders_path: Path | str | None = None,
+    ):
+        """
+        初始化TIF数据加载器
+
+        Args:
+            input_dir: TIF文件所在目录 (如 input_2020)
+            encoders_path: 编码器文件路径，默认为 preprocessor/encoders.pkl
+        """
+        import pickle
+        import rasterio
+
+        self.input_dir = Path(input_dir)
+
+        # 加载编码器
+        if encoders_path is None:
+            encoders_path = Path(__file__).parents[2] / "preprocessor" / "encoders.pkl"
+        else:
+            encoders_path = Path(encoders_path)
+
+        with open(encoders_path, "rb") as f:
+            self.encoders = pickle.load(f)
+
+        # 加载所有TIF文件
+        self._load_tif_files()
+
+        # 获取有效的分类组合
+        self._init_valid_combinations()
+
+    def _load_tif_files(self):
+        """加载所有TIF文件到内存"""
+        import rasterio
+
+        # 静态特征文件映射
+        static_file_map = {
+            "Clay": "CLAY.tif",
+            "CEC": "CEC.tif",
+            "BD": "BD.tif",
+            "pH": "PH.tif",
+            "SOC": "SOC.tif",
+            "TN": "TN.tif",
+        }
+
+        # 动态特征文件映射
+        dynamic_file_map = {
+            "Temp": "T.tif",
+            "Prec": "P.tif",
+            "ST": "ST.tif",
+            "WFPS": "WFPS.tif",
+        }
+
+        # 加载静态特征
+        self.static_data = {}
+        for feat_name, filename in static_file_map.items():
+            filepath = self.input_dir / filename
+            with rasterio.open(filepath) as src:
+                self.static_data[feat_name] = src.read(1)  # shape: (160, 280)
+                # 保存地理参考信息（用于输出）
+                if not hasattr(self, "profile"):
+                    self.profile = src.profile.copy()
+                    self.transform = src.transform
+                    self.crs = src.crs
+
+        # 加载动态特征
+        self.dynamic_data = {}
+        for feat_name, filename in dynamic_file_map.items():
+            filepath = self.input_dir / filename
+            with rasterio.open(filepath) as src:
+                self.dynamic_data[feat_name] = src.read()  # shape: (366, 160, 280)
+                self.n_days = src.count
+
+        # 加载每个作物的特定数据
+        self.crop_data = {}
+        for dir_name in self.DIR_TO_CROP.keys():
+            crop_dir = self.input_dir / dir_name
+            if crop_dir.exists():
+                crop_name = self.DIR_TO_CROP[dir_name]
+                self.crop_data[crop_name] = {}
+
+                # N_amount (静态，单波段)
+                n_amount_path = crop_dir / "N_amount.tif"
+                with rasterio.open(n_amount_path) as src:
+                    self.crop_data[crop_name]["N_amount"] = src.read(1)  # shape: (160, 280)
+
+                # ferdur (动态，多波段)
+                ferdur_path = crop_dir / "ferdur.tif"
+                with rasterio.open(ferdur_path) as src:
+                    self.crop_data[crop_name]["ferdur"] = src.read()  # shape: (366, 160, 280)
+
+                # sowdur (动态，多波段) - 可能需要用于确定有效区域
+                sowdur_path = crop_dir / "sowdur.tif"
+                with rasterio.open(sowdur_path) as src:
+                    self.crop_data[crop_name]["sowdur"] = src.read()  # shape: (366, 160, 280)
+
+        # 获取空间维度
+        self.height, self.width = self.static_data["Clay"].shape
+
+    def _init_valid_combinations(self):
+        """初始化有效的分类特征组合"""
+        # 获取所有类别
+        crop_classes = list(self.encoders["crop_class"].classes_)
+        fert_classes = list(self.encoders["fertilization_class"].classes_)
+        appl_classes = list(self.encoders["appl_class"].classes_)
+
+        # 过滤排除的类别
+        valid_fert = [f for f in fert_classes if f not in self.EXCLUDED_FERT]
+        valid_appl = [a for a in appl_classes if a not in self.EXCLUDED_APPL]
+
+        # 生成所有有效组合
+        self.valid_combinations = []
+        for crop in crop_classes:
+            # 检查该作物是否有对应的数据
+            if crop in self.crop_data:
+                for fert in valid_fert:
+                    for appl in valid_appl:
+                        self.valid_combinations.append((crop, fert, appl))
+
+    def get_prediction_combinations(self) -> list[tuple[str, str, str]]:
+        """
+        返回所有有效的 (crop, fert, appl) 组合
+
+        Returns:
+            组合列表，每个元素为 (crop_name, fert_name, appl_name)
+        """
+        return self.valid_combinations
+
+    def create_rnn_dataset(
+        self,
+        crop: str,
+        fert: str,
+        appl: str,
+        scalers: dict,
+    ) -> "TifPixelDataset":
+        """
+        为特定的分类组合创建可用于DataLoader的数据集
+
+        Args:
+            crop: 作物类别名称
+            fert: 施肥类型名称
+            appl: 施肥方式名称
+            scalers: 训练时使用的特征缩放器
+
+        Returns:
+            TifPixelDataset 实例
+        """
+        # 获取编码后的分类特征值
+        crop_idx = self.encoders["crop_class"].transform([crop])[0]
+        fert_idx = self.encoders["fertilization_class"].transform([fert])[0]
+        appl_idx = self.encoders["appl_class"].transform([appl])[0]
+
+        # 获取该作物的数据
+        crop_n_amount = self.crop_data[crop]["N_amount"]  # (160, 280)
+        crop_ferdur = self.crop_data[crop]["ferdur"]  # (366, 160, 280)
+        crop_sowdur = self.crop_data[crop]["sowdur"]  # (366, 160, 280)
+
+        # 确定有效像素（需要所有特征都非NaN）
+        valid_mask = ~np.isnan(crop_sowdur[0])
+        # 检查静态特征
+        for feat_name in ["Clay", "CEC", "BD", "pH", "SOC", "TN"]:
+            valid_mask = valid_mask & ~np.isnan(self.static_data[feat_name])
+        # 检查动态特征（使用第一天）
+        for feat_name in ["Temp", "Prec", "ST", "WFPS"]:
+            valid_mask = valid_mask & ~np.isnan(self.dynamic_data[feat_name][0])
+        # 检查作物特定数据
+        valid_mask = valid_mask & ~np.isnan(crop_n_amount)
+        valid_mask = valid_mask & ~np.isnan(crop_ferdur[0])
+
+        # 收集有效像素的数据
+        valid_indices = np.where(valid_mask)
+        n_pixels = len(valid_indices[0])
+
+        # 构建每个像素的序列数据
+        pixel_sequences = []
+
+        for i in range(n_pixels):
+            row, col = valid_indices[0][i], valid_indices[1][i]
+
+            # 静态数值特征: Clay, CEC, BD, pH, SOC, TN
+            static_numeric = np.array([
+                self.static_data["Clay"][row, col],
+                self.static_data["CEC"][row, col],
+                self.static_data["BD"][row, col],
+                self.static_data["pH"][row, col],
+                self.static_data["SOC"][row, col],
+                self.static_data["TN"][row, col],
+            ], dtype=np.float32)
+
+            # 动态数值特征: Temp, Prec, ST, WFPS, Split N amount, ferdur, time_delta
+            # 对于每日步长RNN，序列长度为366天
+            dynamic_numeric = np.zeros((self.n_days, 7), dtype=np.float32)
+
+            for day in range(self.n_days):
+                dynamic_numeric[day, 0] = self.dynamic_data["Temp"][day, row, col]
+                dynamic_numeric[day, 1] = self.dynamic_data["Prec"][day, row, col]
+                dynamic_numeric[day, 2] = self.dynamic_data["ST"][day, row, col]
+                dynamic_numeric[day, 3] = self.dynamic_data["WFPS"][day, row, col]
+                dynamic_numeric[day, 4] = crop_n_amount[row, col]  # Split N amount (静态值复制到每天)
+                # ferdur: -1 表示尚未施肥，转换为 0
+                ferdur_val = crop_ferdur[day, row, col]
+                dynamic_numeric[day, 5] = max(0.0, ferdur_val)
+                # time_delta: 每日步长为1（第一天为0）
+                dynamic_numeric[day, 6] = 1.0 if day > 0 else 0.0
+
+            # 静态分类特征
+            static_categorical = np.array([crop_idx], dtype=np.int64)
+
+            # 动态分类特征 (每天都相同)
+            dynamic_categorical = np.zeros((self.n_days, 2), dtype=np.int64)
+            dynamic_categorical[:, 0] = fert_idx
+            dynamic_categorical[:, 1] = appl_idx
+
+            pixel_sequences.append({
+                "pixel_idx": (row, col),
+                "static_numeric": static_numeric,
+                "dynamic_numeric": dynamic_numeric,
+                "static_categorical": static_categorical,
+                "dynamic_categorical": dynamic_categorical,
+            })
+
+        return TifPixelDataset(pixel_sequences, scalers, self.n_days)
+
+    def save_predictions(
+        self,
+        predictions: np.ndarray,
+        pixel_indices: list[tuple[int, int]],
+        crop: str,
+        fert: str,
+        appl: str,
+        output_dir: Path | str,
+    ):
+        """
+        将预测结果保存为TIF文件
+
+        Args:
+            predictions: 预测结果，shape (n_pixels, n_days)
+            pixel_indices: 像素索引列表
+            crop: 作物类别名称
+            fert: 施肥类型名称
+            appl: 施肥方式名称
+            output_dir: 输出目录
+        """
+        import rasterio
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 创建输出数组
+        output_data = np.full((self.n_days, self.height, self.width), np.nan, dtype=np.float32)
+
+        # 填充预测结果
+        for i, (row, col) in enumerate(pixel_indices):
+            output_data[:, row, col] = predictions[i]
+
+        # 更新profile用于多波段输出
+        output_profile = self.profile.copy()
+        output_profile.update(
+            count=self.n_days,
+            dtype="float32",
+        )
+
+        # 保存TIF文件
+        filename = f"{crop}_{fert}_{appl}.tif"
+        output_path = output_dir / filename
+
+        with rasterio.open(output_path, "w", **output_profile) as dst:
+            dst.write(output_data)
+
+        return output_path
+
+
+class TifPixelDataset(Dataset):
+    """TIF像素数据集，用于批量预测"""
+
+    def __init__(
+        self,
+        pixel_sequences: list[dict],
+        scalers: dict,
+        n_days: int,
+    ):
+        """
+        Args:
+            pixel_sequences: 像素序列数据列表
+            scalers: 特征缩放器
+            n_days: 时间步数
+        """
+        self.pixel_sequences = pixel_sequences
+        self.scalers = scalers
+        self.n_days = n_days
+
+        # 应用特征缩放
+        self._apply_feature_engineering()
+
+    def _apply_feature_engineering(self):
+        """应用特征工程（向量化版本，大幅提升性能）"""
+        n_pixels = len(self.pixel_sequences)
+
+        if n_pixels == 0:
+            self.processed_sequences = []
+            return
+
+        # 收集所有像素的原始数据到数组中
+        all_static = np.stack([seq["static_numeric"] for seq in self.pixel_sequences])  # (n_pixels, 6)
+        all_dynamic = np.stack([seq["dynamic_numeric"] for seq in self.pixel_sequences])  # (n_pixels, n_days, 6)
+
+        # 批量处理静态数值特征
+        # static_numeric: Clay, CEC, BD, pH, SOC, TN
+        static_scaled = np.zeros((n_pixels, 6), dtype=np.float32)
+        static_scaled[:, 0] = self.scalers["clay_scaler"].transform(all_static[:, 0:1]).flatten()
+        static_scaled[:, 1] = self.scalers["cec_scaler"].transform(all_static[:, 1:2]).flatten()
+        static_scaled[:, 2] = self.scalers["bd_scaler"].transform(all_static[:, 2:3]).flatten()
+        static_scaled[:, 3] = self.scalers["ph_scaler"].transform(all_static[:, 3:4]).flatten()
+        static_scaled[:, 4] = self.scalers["soc_scaler"].transform(all_static[:, 4:5]).flatten()
+        static_scaled[:, 5] = self.scalers["tn_scaler"].transform(all_static[:, 5:6]).flatten()
+
+        # 裁剪静态特征以防止溢出 (float32 范围约 ±3.4e38，但实际值不应超过 ±10 标准差)
+        static_scaled = np.clip(static_scaled, -10, 10)
+
+        # 批量处理动态数值特征
+        # dynamic_numeric: Temp, Prec, ST, WFPS, Split N amount, ferdur, time_delta
+        # 先重塑为 (n_pixels * n_days, 1) 进行批量变换
+        n_total = n_pixels * self.n_days
+
+        dynamic_scaled = np.zeros((n_pixels, self.n_days, 7), dtype=np.float32)
+
+        # Temp
+        temp_flat = all_dynamic[:, :, 0].reshape(n_total, 1)
+        dynamic_scaled[:, :, 0] = self.scalers["temp_scaler"].transform(temp_flat).reshape(n_pixels, self.n_days)
+
+        # Prec (需要 log1p 变换)
+        prec_flat = np.log1p(all_dynamic[:, :, 1]).reshape(n_total, 1)
+        dynamic_scaled[:, :, 1] = self.scalers["prec_scaler"].transform(prec_flat).reshape(n_pixels, self.n_days)
+
+        # ST
+        st_flat = all_dynamic[:, :, 2].reshape(n_total, 1)
+        dynamic_scaled[:, :, 2] = self.scalers["st_scaler"].transform(st_flat).reshape(n_pixels, self.n_days)
+
+        # WFPS
+        wfps_flat = all_dynamic[:, :, 3].reshape(n_total, 1)
+        dynamic_scaled[:, :, 3] = self.scalers["wfps_scaler"].transform(wfps_flat).reshape(n_pixels, self.n_days)
+
+        # Split N amount (需要 log1p 变换)
+        split_n_flat = np.log1p(all_dynamic[:, :, 4]).reshape(n_total, 1)
+        dynamic_scaled[:, :, 4] = self.scalers["split_n_scaler"].transform(split_n_flat).reshape(n_pixels, self.n_days)
+
+        # ferdur (需要 log1p 变换)
+        ferdur_flat = np.log1p(all_dynamic[:, :, 5]).reshape(n_total, 1)
+        dynamic_scaled[:, :, 5] = self.scalers["ferdur_scaler"].transform(ferdur_flat).reshape(n_pixels, self.n_days)
+
+        # time_delta (不需要缩放，直接复制)
+        dynamic_scaled[:, :, 6] = all_dynamic[:, :, 6]
+
+        # 裁剪动态特征以防止溢出（除了time_delta）
+        dynamic_scaled[:, :, :6] = np.clip(dynamic_scaled[:, :, :6], -10, 10)
+
+        # 构建处理后的序列列表
+        self.processed_sequences = []
+        for i in range(n_pixels):
+            processed_seq = {
+                "pixel_idx": self.pixel_sequences[i]["pixel_idx"],
+                "static_numeric": static_scaled[i],
+                "dynamic_numeric": dynamic_scaled[i],
+                "static_categorical": self.pixel_sequences[i]["static_categorical"],
+                "dynamic_categorical": self.pixel_sequences[i]["dynamic_categorical"],
+                "seq_length": self.n_days,
+            }
+            self.processed_sequences.append(processed_seq)
+
+    def __len__(self) -> int:
+        return len(self.processed_sequences)
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        """返回一个像素序列的张量"""
+        seq = self.processed_sequences[idx]
+        return {
+            "static_numeric": torch.from_numpy(seq["static_numeric"]),
+            "dynamic_numeric": torch.from_numpy(seq["dynamic_numeric"]),
+            "static_categorical": torch.from_numpy(seq["static_categorical"]),
+            "dynamic_categorical": torch.from_numpy(seq["dynamic_categorical"]),
+            "seq_length": seq["seq_length"],
+            "pixel_idx": seq["pixel_idx"],
+        }
+
+    def get_pixel_indices(self) -> list[tuple[int, int]]:
+        """返回所有像素的索引"""
+        return [seq["pixel_idx"] for seq in self.processed_sequences]
+
+    def inverse_transform_targets(self, targets_scaled: np.ndarray) -> np.ndarray:
+        """将缩放后的目标值转换回原始空间"""
+        targets_symlog = self.scalers["target_scaler"].inverse_transform(
+            targets_scaled.reshape(-1, 1)
+        )
+        targets_original = self.scalers["target_symlog"].inverse_transform(
+            targets_symlog
+        )
+        return targets_original.flatten()
