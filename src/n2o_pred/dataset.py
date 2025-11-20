@@ -1100,6 +1100,7 @@ class TifDataLoader:
         fert: str,
         appl: str,
         scalers: dict,
+        model_type: str = "rnn-obs",
     ) -> "TifPixelDataset":
         """
         为特定的分类组合创建可用于DataLoader的数据集
@@ -1109,6 +1110,7 @@ class TifDataLoader:
             fert: 施肥类型名称
             appl: 施肥方式名称
             scalers: 训练时使用的特征缩放器
+            model_type: 模型类型 ("rnn-obs" 或 "rnn-daily")
 
         Returns:
             TifPixelDataset 实例
@@ -1155,11 +1157,20 @@ class TifDataLoader:
                 self.static_data["TN"][row, col],
             ], dtype=np.float32)
 
-            # 动态数值特征: Temp, Prec, ST, WFPS, Split N amount, ferdur, time_delta
-            # 对于每日步长RNN，序列长度为366天
-            dynamic_numeric = np.zeros((self.n_days, 7), dtype=np.float32)
+            # 动态数值特征: Temp, Prec, ST, WFPS, Split N amount, ferdur[, time_delta]
+            # rnn-daily: 6个特征 (不含time_delta)
+            # rnn-obs: 7个特征 (含time_delta)
+            num_dynamic_features = 7 if model_type == "rnn-obs" else 6
+            dynamic_numeric = np.zeros((self.n_days, num_dynamic_features), dtype=np.float32)
+
+            # 创建有效天掩码：sowdur >= 0 表示播种后（有效），sowdur < 0 表示休耕期（无效）
+            valid_days_mask = np.zeros(self.n_days, dtype=bool)
 
             for day in range(self.n_days):
+                sowdur_val = crop_sowdur[day, row, col]
+                is_valid = sowdur_val >= 0  # 播种后为有效天
+                valid_days_mask[day] = is_valid
+
                 dynamic_numeric[day, 0] = self.dynamic_data["Temp"][day, row, col]
                 dynamic_numeric[day, 1] = self.dynamic_data["Prec"][day, row, col]
                 dynamic_numeric[day, 2] = self.dynamic_data["ST"][day, row, col]
@@ -1168,8 +1179,9 @@ class TifDataLoader:
                 # ferdur: -1 表示尚未施肥，转换为 0
                 ferdur_val = crop_ferdur[day, row, col]
                 dynamic_numeric[day, 5] = max(0.0, ferdur_val)
-                # time_delta: 每日步长为1（第一天为0）
-                dynamic_numeric[day, 6] = 1.0 if day > 0 else 0.0
+                # time_delta: 仅对 rnn-obs 模型添加
+                if model_type == "rnn-obs":
+                    dynamic_numeric[day, 6] = 1.0 if day > 0 else 0.0
 
             # 静态分类特征
             static_categorical = np.array([crop_idx], dtype=np.int64)
@@ -1185,9 +1197,10 @@ class TifDataLoader:
                 "dynamic_numeric": dynamic_numeric,
                 "static_categorical": static_categorical,
                 "dynamic_categorical": dynamic_categorical,
+                "valid_days_mask": valid_days_mask,  # 添加有效天掩码
             })
 
-        return TifPixelDataset(pixel_sequences, scalers, self.n_days)
+        return TifPixelDataset(pixel_sequences, scalers, self.n_days, model_type)
 
     def save_predictions(
         self,
@@ -1246,16 +1259,19 @@ class TifPixelDataset(Dataset):
         pixel_sequences: list[dict],
         scalers: dict,
         n_days: int,
+        model_type: str = "rnn-obs",
     ):
         """
         Args:
             pixel_sequences: 像素序列数据列表
             scalers: 特征缩放器
             n_days: 时间步数
+            model_type: 模型类型 ("rnn-obs" 或 "rnn-daily")
         """
         self.pixel_sequences = pixel_sequences
         self.scalers = scalers
         self.n_days = n_days
+        self.model_type = model_type
 
         # 应用特征缩放
         self._apply_feature_engineering()
@@ -1270,7 +1286,11 @@ class TifPixelDataset(Dataset):
 
         # 收集所有像素的原始数据到数组中
         all_static = np.stack([seq["static_numeric"] for seq in self.pixel_sequences])  # (n_pixels, 6)
-        all_dynamic = np.stack([seq["dynamic_numeric"] for seq in self.pixel_sequences])  # (n_pixels, n_days, 6)
+        all_dynamic = np.stack([seq["dynamic_numeric"] for seq in self.pixel_sequences])  # (n_pixels, n_days, 6 or 7)
+        all_valid_masks = np.stack([seq["valid_days_mask"] for seq in self.pixel_sequences])  # (n_pixels, n_days)
+
+        # 检测动态特征数量 (6 for rnn-daily, 7 for rnn-obs)
+        num_dynamic_features = all_dynamic.shape[2]
 
         # 批量处理静态数值特征
         # static_numeric: Clay, CEC, BD, pH, SOC, TN
@@ -1286,11 +1306,11 @@ class TifPixelDataset(Dataset):
         static_scaled = np.clip(static_scaled, -10, 10)
 
         # 批量处理动态数值特征
-        # dynamic_numeric: Temp, Prec, ST, WFPS, Split N amount, ferdur, time_delta
+        # dynamic_numeric: Temp, Prec, ST, WFPS, Split N amount, ferdur[, time_delta]
         # 先重塑为 (n_pixels * n_days, 1) 进行批量变换
         n_total = n_pixels * self.n_days
 
-        dynamic_scaled = np.zeros((n_pixels, self.n_days, 7), dtype=np.float32)
+        dynamic_scaled = np.zeros((n_pixels, self.n_days, num_dynamic_features), dtype=np.float32)
 
         # Temp
         temp_flat = all_dynamic[:, :, 0].reshape(n_total, 1)
@@ -1316,8 +1336,9 @@ class TifPixelDataset(Dataset):
         ferdur_flat = np.log1p(all_dynamic[:, :, 5]).reshape(n_total, 1)
         dynamic_scaled[:, :, 5] = self.scalers["ferdur_scaler"].transform(ferdur_flat).reshape(n_pixels, self.n_days)
 
-        # time_delta (不需要缩放，直接复制)
-        dynamic_scaled[:, :, 6] = all_dynamic[:, :, 6]
+        # time_delta (仅对 rnn-obs，不需要缩放，直接复制)
+        if num_dynamic_features == 7:
+            dynamic_scaled[:, :, 6] = all_dynamic[:, :, 6]
 
         # 裁剪动态特征以防止溢出（除了time_delta）
         dynamic_scaled[:, :, :6] = np.clip(dynamic_scaled[:, :, :6], -10, 10)
@@ -1331,6 +1352,7 @@ class TifPixelDataset(Dataset):
                 "dynamic_numeric": dynamic_scaled[i],
                 "static_categorical": self.pixel_sequences[i]["static_categorical"],
                 "dynamic_categorical": self.pixel_sequences[i]["dynamic_categorical"],
+                "valid_days_mask": all_valid_masks[i],  # 保存有效天掩码
                 "seq_length": self.n_days,
             }
             self.processed_sequences.append(processed_seq)
@@ -1346,6 +1368,7 @@ class TifPixelDataset(Dataset):
             "dynamic_numeric": torch.from_numpy(seq["dynamic_numeric"]),
             "static_categorical": torch.from_numpy(seq["static_categorical"]),
             "dynamic_categorical": torch.from_numpy(seq["dynamic_categorical"]),
+            "valid_days_mask": torch.from_numpy(seq["valid_days_mask"]),  # 返回有效天掩码
             "seq_length": seq["seq_length"],
             "pixel_idx": seq["pixel_idx"],
         }
@@ -1353,6 +1376,10 @@ class TifPixelDataset(Dataset):
     def get_pixel_indices(self) -> list[tuple[int, int]]:
         """返回所有像素的索引"""
         return [seq["pixel_idx"] for seq in self.processed_sequences]
+
+    def get_valid_masks(self) -> np.ndarray:
+        """返回所有像素的有效天掩码，shape: (n_pixels, n_days)"""
+        return np.array([seq["valid_days_mask"] for seq in self.processed_sequences], dtype=bool)
 
     def inverse_transform_targets(self, targets_scaled: np.ndarray) -> np.ndarray:
         """将缩放后的目标值转换回原始空间"""

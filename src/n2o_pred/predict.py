@@ -557,7 +557,7 @@ def predict_tif_data(
         logger.info(f"[{idx}/{len(combinations)}] 正在加载 {combination_name} 数据...")
         dataset_start_time = time.time()
         dataset = tif_loader.create_rnn_dataset(
-            crop, fert, appl, predictor.scalers
+            crop, fert, appl, predictor.scalers, model_type=predictor.model_type
         )
         dataset_load_time = time.time() - dataset_start_time
 
@@ -618,10 +618,16 @@ def predict_tif_data(
         # 转换为数组
         predictions_array = np.array(all_predictions)  # shape: (n_pixels, n_days)
 
+        # 获取有效天掩码
+        valid_masks = dataset.get_valid_masks()  # shape: (n_pixels, n_days)
+
+        # 将休耕期（无效天）的预测值设为 NaN
+        predictions_array[~valid_masks] = np.nan
+
         # 获取像素索引
         pixel_indices = dataset.get_pixel_indices()
 
-        # 保存预测结果
+        # 保存预测结果（包含 NaN 的休耕期）
         output_path = tif_loader.save_predictions(
             predictions_array,
             pixel_indices,
