@@ -125,7 +125,7 @@ def cmd_compare(args):
     logger.info("对比完成！")
     if summary:
         logger.info(f"最佳模型(按R2): {summary['best_model_by_R2']['experiment']}")
-        logger.info(f"  R2: {summary['best_model_by_R2']['val_R2']:.4f}")
+        logger.info(f"  R2: {summary['best_model_by_R2']['test_R2']:.4f}")
 
 
 def cmd_predict(args):

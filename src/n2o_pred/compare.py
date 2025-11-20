@@ -195,9 +195,9 @@ class ModelComparator:
                 "Train R2": result["metrics"]["train"]["R2"],
                 "Train RMSE": result["metrics"]["train"]["RMSE"],
                 "Train MAE": result["metrics"]["train"]["MAE"],
-                "Val R2": result["metrics"]["val"]["R2"],
-                "Val RMSE": result["metrics"]["val"]["RMSE"],
-                "Val MAE": result["metrics"]["val"]["MAE"],
+                "Test R2": result["metrics"]["test"]["R2"],
+                "Test RMSE": result["metrics"]["test"]["RMSE"],
+                "Test MAE": result["metrics"]["test"]["MAE"],
             }
             if "n_parameters" in result["metrics"]:
                 row["N Parameters"] = result["metrics"]["n_parameters"]
@@ -208,46 +208,90 @@ class ModelComparator:
         df.to_csv(tables_dir / "comparison.csv", index=False)
         logger.info(f"  对比表格已保存到 {tables_dir / 'comparison.csv'}")
 
-    def _generate_split_comparison_plots(
-        self, model_results: list[dict], figs_dir: Path
-    ):
-        """为单个split生成对比图表"""
+    def _generate_split_comparison_plots(self, model_results: list[dict], figs_dir: Path):
+        """为单个split生成对比图表 (美化版)"""
+        
+        # 设置全局风格（可选，如果想保持和其他图一致可去掉）
+        # plt.style.use('seaborn-v0_8-whitegrid') 
+        
         # 1. 验证集指标对比条形图
-        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6), dpi=300) # 提高DPI使图像更清晰
 
         metrics_to_plot = ["R2", "RMSE", "MAE"]
         exp_names = [r["exp_name"] for r in model_results]
+        
+        # 定义更柔和的颜色方案 (例如使用 tab10 或 set2)
+        # 也可以继续使用 viridis，但建议稍微透明一点
+        colors = plt.cm.viridis(np.linspace(0.2, 0.9, len(exp_names))) 
 
         for i, metric in enumerate(metrics_to_plot):
             ax = axes[i]
-            values = [r["metrics"]["val"][metric] for r in model_results]
+            values = [r["metrics"]["test"][metric] for r in model_results]
 
+            # --- 核心美化修改 ---
+            # 1. width: 设置柱子宽度 (0.6 比较适中)
+            # 2. zorder: 设为3，确保柱子在网格线上面
+            # 3. edgecolor/linewidth: 给柱子加个细白边，更有质感
             bars = ax.bar(
                 range(len(exp_names)),
                 values,
-                color=plt.cm.viridis(np.linspace(0, 1, len(exp_names))),
+                color=colors,
+                width=0.5,         # [关键] 调窄柱子
+                edgecolor='white', # [美化] 白色描边
+                linewidth=1.2,     # [美化] 描边宽度
+                zorder=3,          # [美化] 图层置于网格之上
+                alpha=0.9          # [美化] 轻微透明度
             )
-            ax.set_xticks(range(len(exp_names)))
-            ax.set_xticklabels(exp_names, rotation=45, ha="right")
-            ax.set_ylabel(metric, fontsize=12)
-            ax.set_title(f"Validation {metric}", fontsize=13, fontweight="bold")
-            ax.grid(axis="y", alpha=0.3)
 
-            # 添加数值标签
+            # --- 坐标轴美化 ---
+            ax.set_xticks(range(len(exp_names)))
+            ax.set_xticklabels(exp_names, rotation=30, ha="right", fontsize=11) # 角度改小一点，易读
+            
+            # 设置标题和字号
+            ax.set_title(f"Test {metric}", fontsize=14, fontweight="bold", pad=15)
+            
+            # --- 网格与边框 ---
+            ax.grid(axis="y", linestyle='--', alpha=0.5, zorder=0) # 网格虚线，置于底层
+            
+            # 去掉上方和右侧的边框 (Spines)
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            # 加粗左侧和底部边框
+            ax.spines['left'].set_linewidth(1.2)
+            ax.spines['bottom'].set_linewidth(1.2)
+
+            # --- 数值标签 ---
+            # 动态计算Y轴上限，留出 15% 的空间给文字
+            if values:
+                max_val = max(values)
+                min_val = min(values)
+                # 如果有负数(如R2)，需要特殊处理ylim，这里简单处理正数场景为主
+                range_val = max_val - min(0, min_val)
+                ax.set_ylim(bottom=min(0, min_val) * 1.1, top=max_val + range_val * 0.15)
+
             for bar, val in zip(bars, values):
+                height = bar.get_height()
+                # 处理负值情况下的标签位置
+                y_pos = height if height >= 0 else 0
+                va_align = 'bottom' if height >= 0 else 'bottom' 
+                
                 ax.text(
                     bar.get_x() + bar.get_width() / 2,
-                    bar.get_height(),
+                    y_pos,
                     f"{val:.4f}",
                     ha="center",
-                    va="bottom",
+                    va=va_align,
                     fontsize=10,
+                    fontweight='medium',
+                    color='#333333', # 深灰色文字比纯黑更柔和
+                    zorder=4 # 文字在最上层
                 )
 
         plt.tight_layout()
-        plt.savefig(figs_dir / "metrics_comparison.png", dpi=300, bbox_inches="tight")
+        save_path = figs_dir / "metrics_comparison.png"
+        plt.savefig(save_path, bbox_inches="tight")
         plt.close()
-        logger.info(f"  指标对比图已保存到 {figs_dir / 'metrics_comparison.png'}")
+        logger.info(f"  指标对比图已保存到 {save_path}")
 
     def _generate_overall_summary(
         self, common_seeds: list[int], split_results: list[dict]
@@ -268,27 +312,27 @@ class ModelComparator:
             for seed in common_seeds:
                 for result in summary["split_results"]:
                     if result["seed"] == seed:
-                        r2_list.append(result["metrics"]["val"]["R2"])
-                        rmse_list.append(result["metrics"]["val"]["RMSE"])
-                        mae_list.append(result["metrics"]["val"]["MAE"])
+                        r2_list.append(result["metrics"]["test"]["R2"])
+                        rmse_list.append(result["metrics"]["test"]["RMSE"])
+                        mae_list.append(result["metrics"]["test"]["MAE"])
                         break
 
             model_performance[exp_name] = {
                 "model_type": model_type,
-                "val_R2_mean": float(np.mean(r2_list)) if r2_list else 0,
-                "val_R2_std": float(np.std(r2_list)) if r2_list else 0,
-                "val_RMSE_mean": float(np.mean(rmse_list)) if rmse_list else 0,
-                "val_RMSE_std": float(np.std(rmse_list)) if rmse_list else 0,
-                "val_MAE_mean": float(np.mean(mae_list)) if mae_list else 0,
-                "val_MAE_std": float(np.std(mae_list)) if mae_list else 0,
+                "test_R2_mean": float(np.mean(r2_list)) if r2_list else 0,
+                "test_R2_std": float(np.std(r2_list)) if r2_list else 0,
+                "test_RMSE_mean": float(np.mean(rmse_list)) if rmse_list else 0,
+                "test_RMSE_std": float(np.std(rmse_list)) if rmse_list else 0,
+                "test_MAE_mean": float(np.mean(mae_list)) if mae_list else 0,
+                "test_MAE_std": float(np.std(mae_list)) if mae_list else 0,
             }
 
         # 找出最佳模型
         best_by_r2 = max(
-            model_performance.items(), key=lambda x: x[1]["val_R2_mean"]
+            model_performance.items(), key=lambda x: x[1]["test_R2_mean"]
         )
         best_by_rmse = min(
-            model_performance.items(), key=lambda x: x[1]["val_RMSE_mean"]
+            model_performance.items(), key=lambda x: x[1]["test_RMSE_mean"]
         )
 
         summary = {
@@ -300,12 +344,12 @@ class ModelComparator:
             "best_model_by_R2": {
                 "experiment": best_by_r2[0],
                 "model_type": best_by_r2[1]["model_type"],
-                "val_R2": best_by_r2[1]["val_R2_mean"],
+                "test_R2": best_by_r2[1]["test_R2_mean"],
             },
             "best_model_by_RMSE": {
                 "experiment": best_by_rmse[0],
                 "model_type": best_by_rmse[1]["model_type"],
-                "val_RMSE": best_by_rmse[1]["val_RMSE_mean"],
+                "test_RMSE": best_by_rmse[1]["test_RMSE_mean"],
             },
         }
 
@@ -324,13 +368,13 @@ class ModelComparator:
             logger.warning(f"  无法加载基础数据集: {e}，跳过序列预测对比")
             return
 
-        # 使用指定种子划分验证集
+        # 使用指定种子划分测试集
         from sklearn.model_selection import train_test_split as sklearn_split
 
         n_sequences = len(base_dataset)
         indices = list(range(n_sequences))
-        _, val_indices = sklearn_split(indices, train_size=0.9, random_state=seed)
-        val_base = base_dataset[val_indices]
+        _, test_indices = sklearn_split(indices, train_size=0.9, random_state=seed)
+        test_base = base_dataset[test_indices]
 
         # 为每个模型加载预测器并进行预测
         model_predictions_by_seq = {}
@@ -358,24 +402,32 @@ class ModelComparator:
             try:
                 # 加载预测器并预测
                 predictor = N2OPredictor(split_dir)
-                pred_results = predictor.predict(val_base, device="cpu", batch_size=32)
+                pred_results = predictor.predict(test_base, device="cpu", batch_size=32)
                 predictions_flat = pred_results["predictions"]
 
                 # 重构为序列
                 if model_type == "rf":
-                    val_df = val_base.flatten_to_dataframe_for_rf()
-                    val_df["predicted"] = predictions_flat
+                    test_df = test_base.flatten_to_dataframe_for_rf()
+                    test_df["predicted"] = predictions_flat
                     preds_by_seq = []
-                    for seq in val_base.sequences:
-                        seq_pred = val_df[
-                            (val_df["Publication"] == seq["seq_id"][0])
-                            & (val_df["control_group"] == seq["seq_id"][1])
+                    for seq in test_base.sequences:
+                        seq_pred = test_df[
+                            (test_df["Publication"] == seq["seq_id"][0])
+                            & (test_df["control_group"] == seq["seq_id"][1])
                         ]["predicted"].values
-                        preds_by_seq.append(seq_pred)
+                        # 确保长度一致（可能因为排序或其他原因导致长度不匹配）
+                        expected_len = seq["seq_length"]
+                        if len(seq_pred) != expected_len:
+                            logger.warning(
+                                f"  序列 {seq['seq_id']} 预测长度 {len(seq_pred)} 与期望长度 {expected_len} 不匹配，跳过该序列"
+                            )
+                            preds_by_seq.append(None)  # 标记为无效
+                        else:
+                            preds_by_seq.append(seq_pred)
                 else:
                     preds_by_seq = []
                     idx = 0
-                    for seq in val_base.sequences:
+                    for seq in test_base.sequences:
                         seq_len = seq["seq_length"]
                         preds_by_seq.append(predictions_flat[idx : idx + seq_len])
                         idx += seq_len
@@ -391,11 +443,50 @@ class ModelComparator:
             return
 
         # 计算序列指标并选择好的长序列
-        first_model_preds = list(model_predictions_by_seq.values())[0]
-        targets_by_seq = [np.array(seq["targets"]) for seq in val_base.sequences]
+        targets_by_seq = [np.array(seq["targets"]) for seq in test_base.sequences]
+        n_sequences = len(targets_by_seq)
 
-        seq_metrics = compute_sequence_metrics(first_model_preds, targets_by_seq)
-        seq_ids = [tuple(seq["seq_id"]) for seq in val_base.sequences]
+        # 找到所有模型中都有效的序列（交集）
+        # 一个序列有效的条件：
+        # 1. 所有模型对该序列的预测都不为 None
+        # 2. 所有模型的预测长度都等于目标长度
+        valid_indices = []
+        for i in range(n_sequences):
+            target_len = len(targets_by_seq[i])
+            is_valid = True
+            for model_name, preds_by_seq in model_predictions_by_seq.items():
+                pred = preds_by_seq[i]
+                if pred is None:
+                    is_valid = False
+                    break
+                if len(pred) != target_len:
+                    logger.warning(
+                        f"  序列 {i} 模型 {model_name} 预测长度 {len(pred)} 与目标长度 {target_len} 不匹配，跳过"
+                    )
+                    is_valid = False
+                    break
+            if is_valid:
+                valid_indices.append(i)
+
+        if len(valid_indices) == 0:
+            logger.warning("  没有有效的序列预测结果，跳过序列预测对比")
+            return
+
+        logger.info(f"  找到 {len(valid_indices)}/{n_sequences} 个有效序列")
+
+        # 只保留有效序列
+        first_model_name = list(model_predictions_by_seq.keys())[0]
+        first_model_preds_valid = [model_predictions_by_seq[first_model_name][i] for i in valid_indices]
+        targets_by_seq_valid = [targets_by_seq[i] for i in valid_indices]
+        valid_sequences = [test_base.sequences[i] for i in valid_indices]
+
+        # 对所有模型的预测也进行过滤
+        valid_model_predictions = {}
+        for model_name, preds_by_seq in model_predictions_by_seq.items():
+            valid_model_predictions[model_name] = [preds_by_seq[i] for i in valid_indices]
+
+        seq_metrics = compute_sequence_metrics(first_model_preds_valid, targets_by_seq_valid)
+        seq_ids = [tuple(seq["seq_id"]) for seq in valid_sequences]
         seq_metrics["seq_id_tuple"] = seq_ids
 
         good_seq_indices = select_good_sequences(seq_metrics, min_length=15, top_n=5)
@@ -406,15 +497,15 @@ class ModelComparator:
 
         logger.info(f"  绘制 {len(good_seq_indices)} 个序列的对比图...")
         for idx in good_seq_indices:
-            seq = val_base.sequences[idx]
+            seq = valid_sequences[idx]
             seq_id = tuple(seq["seq_id"])
             time_steps = np.array(seq["sowdurs"])
             targets = np.array(seq["targets"])
 
             # 收集所有模型的预测
             model_preds = {}
-            for model_name, preds_by_seq in model_predictions_by_seq.items():
-                model_preds[model_name] = preds_by_seq[idx]
+            for model_name, valid_preds in valid_model_predictions.items():
+                model_preds[model_name] = valid_preds[idx]
 
             plot_multi_model_sequence_predictions(
                 seq_id,
