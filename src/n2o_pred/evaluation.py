@@ -355,31 +355,32 @@ def plot_multi_model_sequence_predictions(
     """
     plt.figure(figsize=(12, 6))
 
+    # 为每个模型使用不同的颜色和样式
+    colors = [plt.cm.tab10(i % 10) for i in range(1 + len(model_predictions))]
+    markers = ["o", "s", "^", "D", "v", "p", "h", "*"]
+    
     # 绘制真实值
     plt.plot(
         time_steps,
         targets,
-        "ko-",
+        marker=markers[0],
         label="Actual",
-        markersize=6,
-        linewidth=2,
+        markersize=3,
+        linewidth=1.8,
         alpha=0.8,
+        color=colors[0],
     )
-
-    # 为每个模型使用不同的颜色和样式
-    colors = plt.cm.tab10(np.linspace(0, 1, len(model_predictions)))
-    markers = ["s", "^", "D", "v", "p", "h", "*"]
 
     for i, (model_name, predictions) in enumerate(model_predictions.items()):
         plt.plot(
             time_steps,
             predictions,
-            marker=markers[i % len(markers)],
+            marker=markers[(i + 1) % len(markers)],
             label=model_name,
-            markersize=5,
+            markersize=3,
             linewidth=1.5,
             alpha=0.7,
-            color=colors[i],
+            color=colors[i + 1],
         )
 
     plt.xlabel("Time (days since sowing)", fontsize=12)

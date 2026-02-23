@@ -948,18 +948,32 @@ class TifDataLoader:
 
     # 作物目录名到编码器类别名的映射
     DIR_TO_CROP = {
-        "barley": "barley",
-        "fruit": "fruit",
-        "legume": "legume",
-        "maize": "maize",
-        "oilplant": "oilplant",
-        "other_cereal": "other_cereal",
-        "potato": "potato",
-        "rice": "rice",
-        "sugar": "sugarbeet",  # 特殊映射
-        "vegetables": "vegetables",
-        "wheat": "wheat",
+        "barley2": "barley",
+        # "fruit": "fruit",
+        # "legume": "legume",
+        # "maize": "maize",
+        "oilplant2": "oilplant",
+        "other_cereal2": "other_cereal",
+        # "potato": "potato",
+        # "rice": "rice",
+        # "sugar": "sugarbeet",  # 特殊映射
+        # "vegetables": "vegetables",
+        "wheat2": "wheat",
     }
+    # DIR_TO_CROP = {
+    #     "barley2": "barley",
+    #     # "fruit": "fruit",
+    #     # "legume": "legume",
+    #     # "maize": "maize",
+    #     "oilplant2": "oilplant",
+    #     "other_cereal2": "other_cereal",
+    #     # "potato": "potato",
+    #     # "rice": "rice",
+    #     # "sugar": "sugarbeet",  # 特殊映射
+    #     # "vegetables": "vegetables",
+    #     "wheat2": "wheat",
+    # }
+
 
     # 排除的分类值（无施肥情况）
     EXCLUDED_FERT = ["NO"]  # fertilization_class 中排除
