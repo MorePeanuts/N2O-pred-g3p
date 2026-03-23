@@ -2,10 +2,10 @@
 """
 TIF预测结果集成脚本
 计算多个预测结果的均值和方差
+保持输入源的目录结构
 """
 
 import argparse
-import pickle
 from pathlib import Path
 from typing import Any
 
@@ -36,23 +36,22 @@ def find_tif_files(input_path: Path) -> list[Path]:
         return sorted(tif_files)
 
 
-def group_tif_files_by_name(tif_files: list[Path]) -> dict[str, list[Path]]:
+def build_relative_path_map(input_dir: Path, tif_files: list[Path]) -> dict[Path, Path]:
     """
-    按文件名分组TIF文件（不包含扩展名）
+    构建相对路径到完整路径的映射
 
     Args:
+        input_dir: 输入目录
         tif_files: TIF文件路径列表
 
     Returns:
-        分组后的字典，键为文件名（不含扩展名），值为文件路径列表
+        相对路径 -> 完整路径 的字典
     """
-    groups: dict[str, list[Path]] = {}
+    path_map = {}
     for tif_file in tif_files:
-        name = tif_file.stem
-        if name not in groups:
-            groups[name] = []
-        groups[name].append(tif_file)
-    return groups
+        rel_path = tif_file.relative_to(input_dir)
+        path_map[rel_path] = tif_file
+    return path_map
 
 
 def load_tif_data(tif_path: Path) -> tuple[np.ndarray, dict[str, Any]]:
@@ -113,28 +112,28 @@ def save_tif_data(data: np.ndarray, profile: dict[str, Any], output_path: Path):
         dst.write(data.astype(np.float32))
 
 
-def process_group(
-    group_name: str,
-    tif_files: list[Path],
+def process_relative_path(
+    rel_path: Path,
+    input_files: list[Path],
     output_dir: Path,
     skip_var: bool = False,
 ):
     """
-    处理一组TIF文件组
+    处理一个相对路径对应的所有文件
 
     Args:
-        group_name: 组名（文件名不含扩展名）
-        tif_files: TIF文件路径列表
+        rel_path: 相对路径
+        input_files: 对应的输入文件列表
         output_dir: 输出目录
         skip_var: 是否跳过方差计算
     """
-    print(f"\n处理组: {group_name} ({len(tif_files)} 个文件)")
+    print(f"\n处理: {rel_path} ({len(input_files)} 个文件)")
 
     # 加载所有数据
     data_list = []
     common_profile = None
 
-    for tif_file in tqdm(tif_files, desc="加载文件"):
+    for tif_file in tqdm(input_files, desc="加载文件", leave=False):
         data, profile = load_tif_data(tif_file)
         data_list.append(data)
 
@@ -149,19 +148,25 @@ def process_group(
                 )
 
     # 计算统计量
-    print("计算统计量...")
     mean_data, var_data = compute_ensemble_stats(data_list)
 
+    # 构建输出路径：在原文件名后加后缀
+    # 例如: crop_fert_appl.tif -> crop_fert_appl_mean.tif
+    stem = rel_path.stem
+    suffix = rel_path.suffix
+
     # 保存均值
-    mean_output_path = output_dir / f"{group_name}_mean.tif"
+    mean_rel_path = rel_path.parent / f"{stem}_mean{suffix}"
+    mean_output_path = output_dir / mean_rel_path
     save_tif_data(mean_data, common_profile, mean_output_path)
-    print(f"均值已保存到: {mean_output_path}")
+    print(f"  均值: {mean_rel_path}")
 
     # 保存方差
     if not skip_var:
-        var_output_path = output_dir / f"{group_name}_var.tif"
+        var_rel_path = rel_path.parent / f"{stem}_var{suffix}"
+        var_output_path = output_dir / var_rel_path
         save_tif_data(var_data, common_profile, var_output_path)
-        print(f"方差已保存到: {var_output_path}")
+        print(f"  方差: {var_rel_path}")
 
 
 def main():
@@ -188,30 +193,43 @@ def main():
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 查找所有TIF文件
-    all_tif_files = []
-    for input_path_str in args.inputs:
-        input_path = Path(input_path_str)
-        if not input_path.exists():
-            print(f"警告: 路径不存在: {input_path}")
-            continue
-        tif_files = find_tif_files(input_path)
-        all_tif_files.extend(tif_files)
-        print(f"从 {input_path} 找到 {len(tif_files)} 个TIF文件")
+    # 处理每个输入源
+    input_dirs = [Path(p) for p in args.inputs]
 
-    if not all_tif_files:
-        print("错误: 未找到任何TIF文件")
+    # 验证所有输入都是目录（混合模式暂不支持，需要明确目录结构）
+    for input_dir in input_dirs:
+        if not input_dir.is_dir():
+            print(f"错误: 输入必须都是目录，以保持一致的目录结构: {input_dir}")
+            return
+
+    # 为每个输入源构建相对路径映射
+    input_path_maps = []
+    all_rel_paths = set()
+
+    print("扫描输入目录...")
+    for input_dir in input_dirs:
+        tif_files = find_tif_files(input_dir)
+        path_map = build_relative_path_map(input_dir, tif_files)
+        input_path_maps.append(path_map)
+        all_rel_paths.update(path_map.keys())
+        print(f"  {input_dir}: {len(tif_files)} 个TIF文件")
+
+    # 只处理所有输入源都有的相对路径
+    common_rel_paths = set(all_rel_paths)
+    for path_map in input_path_maps:
+        common_rel_paths.intersection_update(path_map.keys())
+
+    common_rel_paths = sorted(common_rel_paths)
+    print(f"\n共有的相对路径: {len(common_rel_paths)} 个")
+
+    if not common_rel_paths:
+        print("错误: 输入目录之间没有找到共有的TIF文件")
         return
 
-    print(f"\n总共找到 {len(all_tif_files)} 个TIF文件")
-
-    # 按文件名分组
-    groups = group_tif_files_by_name(all_tif_files)
-    print(f"按文件名分组为 {len(groups)} 组")
-
-    # 处理每个组
-    for group_name, tif_files in groups.items():
-        process_group(group_name, tif_files, output_dir, args.skip_var)
+    # 处理每个共有相对路径
+    for rel_path in common_rel_paths:
+        input_files = [path_map[rel_path] for path_map in input_path_maps]
+        process_relative_path(rel_path, input_files, output_dir, args.skip_var)
 
     print("\n完成!")
 
