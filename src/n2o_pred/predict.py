@@ -6,7 +6,7 @@ import pickle
 import time
 from pathlib import Path
 from typing import Any
-
+import torch.nn as nn
 import numpy as np
 import pandas as pd
 import torch
@@ -530,6 +530,11 @@ def predict_tif_data(
     device_obj = torch.device(device)
     predictor.model = predictor.model.to(device_obj)
     predictor.model.eval()
+    for m in predictor.model.modules():
+        if isinstance(m, nn.Dropout):
+            m.train()
+        if isinstance(m, (nn.GRU, nn.LSTM)):
+            m.train()
 
     # 记录结果
     results = {
