@@ -532,8 +532,10 @@ def predict_tif_data(
     predictor.model.eval()
     for m in predictor.model.modules():
         if isinstance(m, nn.Dropout):
+            m.p = 0.05
             m.train()
         if isinstance(m, (nn.GRU, nn.LSTM)):
+            m.dropout = 0.05
             m.train()
 
     # 记录结果
