@@ -947,23 +947,21 @@ class TifDataLoader:
     """TIF格式数据加载器，用于在TIF和RNN输入格式之间转换"""
 
     # 作物目录名到编码器类别名的映射
-    # DIR_TO_CROP = {
-    #     "barley": "barley",
-    #     "fruit": "fruit",
-    #     "legume": "legume",
-    #     "maize": "maize",
-    #     "oilplant": "oilplant",
-    #     "other_cereal": "other_cereal",
-    #     "potato": "potato",
-    #     "rice": "rice",
-    #     "sugar": "sugarbeet",  # 特殊映射
-    #     "vegetables": "vegetables",
-    #     "wheat": "wheat",
-    # }
     DIR_TO_CROP = {
+        "barley": "barley",
         "barley2": "barley",
+        "fruit": "fruit",
+        "legume": "legume",
+        "maize": "maize",
+        "oilplant": "oilplant",
         "oilplant2": "oilplant",
+        "other_cereal": "other_cereal",
         "other_cereal2": "other_cereal",
+        "potato": "potato",
+        "rice": "rice",
+        "sugar": "sugarbeet",  # 特殊映射
+        "vegetables": "vegetables",
+        "wheat": "wheat",
         "wheat2": "wheat",
     }
 
@@ -1047,27 +1045,33 @@ class TifDataLoader:
                 self.n_days = src.count
 
         # 加载每个作物的特定数据
+        # 结构: {crop_name: {source_name: {"N_amount": ..., "ferdur": ..., "sowdur": ...}}}
         self.crop_data = {}
         for dir_name in self.DIR_TO_CROP.keys():
             crop_dir = self.input_dir / dir_name
             if crop_dir.exists():
                 crop_name = self.DIR_TO_CROP[dir_name]
-                self.crop_data[crop_name] = {}
+                source_name = dir_name  # 使用目录名作为来源标识
+
+                if crop_name not in self.crop_data:
+                    self.crop_data[crop_name] = {}
+
+                self.crop_data[crop_name][source_name] = {}
 
                 # N_amount (静态，单波段)
                 n_amount_path = crop_dir / "N_amount.tif"
                 with rasterio.open(n_amount_path) as src:
-                    self.crop_data[crop_name]["N_amount"] = src.read(1)  # shape: (160, 280)
+                    self.crop_data[crop_name][source_name]["N_amount"] = src.read(1)  # shape: (160, 280)
 
                 # ferdur (动态，多波段)
                 ferdur_path = crop_dir / "ferdur.tif"
                 with rasterio.open(ferdur_path) as src:
-                    self.crop_data[crop_name]["ferdur"] = src.read()  # shape: (366, 160, 280)
+                    self.crop_data[crop_name][source_name]["ferdur"] = src.read()  # shape: (366, 160, 280)
 
                 # sowdur (动态，多波段) - 可能需要用于确定有效区域
                 sowdur_path = crop_dir / "sowdur.tif"
                 with rasterio.open(sowdur_path) as src:
-                    self.crop_data[crop_name]["sowdur"] = src.read()  # shape: (366, 160, 280)
+                    self.crop_data[crop_name][source_name]["sowdur"] = src.read()  # shape: (366, 160, 280)
 
         # 获取空间维度
         self.height, self.width = self.static_data["Clay"].shape
@@ -1083,21 +1087,23 @@ class TifDataLoader:
         valid_fert = [f for f in fert_classes if f not in self.EXCLUDED_FERT]
         valid_appl = [a for a in appl_classes if a not in self.EXCLUDED_APPL]
 
-        # 生成所有有效组合
+        # 生成所有有效组合 (crop, fert, appl, source)
         self.valid_combinations = []
         for crop in crop_classes:
             # 检查该作物是否有对应的数据
             if crop in self.crop_data:
-                for fert in valid_fert:
-                    for appl in valid_appl:
-                        self.valid_combinations.append((crop, fert, appl))
+                # 遍历该作物的所有数据源
+                for source_name in self.crop_data[crop].keys():
+                    for fert in valid_fert:
+                        for appl in valid_appl:
+                            self.valid_combinations.append((crop, fert, appl, source_name))
 
-    def get_prediction_combinations(self) -> list[tuple[str, str, str]]:
+    def get_prediction_combinations(self) -> list[tuple[str, str, str, str]]:
         """
-        返回所有有效的 (crop, fert, appl) 组合
+        返回所有有效的 (crop, fert, appl, source) 组合
 
         Returns:
-            组合列表，每个元素为 (crop_name, fert_name, appl_name)
+            组合列表，每个元素为 (crop_name, fert_name, appl_name, source_name)
         """
         return self.valid_combinations
 
@@ -1106,6 +1112,7 @@ class TifDataLoader:
         crop: str,
         fert: str,
         appl: str,
+        source_name: str,
         scalers: dict,
         model_type: str = "rnn-obs",
     ) -> "TifPixelDataset":
@@ -1116,6 +1123,7 @@ class TifDataLoader:
             crop: 作物类别名称
             fert: 施肥类型名称
             appl: 施肥方式名称
+            source_name: 数据源名称（目录名）
             scalers: 训练时使用的特征缩放器
             model_type: 模型类型 ("rnn-obs" 或 "rnn-daily")
 
@@ -1127,10 +1135,10 @@ class TifDataLoader:
         fert_idx = self.encoders["fertilization_class"].transform([fert])[0]
         appl_idx = self.encoders["appl_class"].transform([appl])[0]
 
-        # 获取该作物的数据
-        crop_n_amount = self.crop_data[crop]["N_amount"]  # (160, 280)
-        crop_ferdur = self.crop_data[crop]["ferdur"]  # (366, 160, 280)
-        crop_sowdur = self.crop_data[crop]["sowdur"]  # (366, 160, 280)
+        # 获取该作物特定来源的数据
+        crop_n_amount = self.crop_data[crop][source_name]["N_amount"]  # (160, 280)
+        crop_ferdur = self.crop_data[crop][source_name]["ferdur"]  # (366, 160, 280)
+        crop_sowdur = self.crop_data[crop][source_name]["sowdur"]  # (366, 160, 280)
 
         # 确定有效像素（需要所有特征都非NaN）
         valid_mask = ~np.isnan(crop_sowdur[0])
@@ -1216,6 +1224,7 @@ class TifDataLoader:
         crop: str,
         fert: str,
         appl: str,
+        source_name: str,
         output_dir: Path | str,
     ):
         """
@@ -1227,6 +1236,7 @@ class TifDataLoader:
             crop: 作物类别名称
             fert: 施肥类型名称
             appl: 施肥方式名称
+            source_name: 数据源名称（目录名）
             output_dir: 输出目录
         """
         import rasterio
@@ -1248,8 +1258,8 @@ class TifDataLoader:
             dtype="float32",
         )
 
-        # 保存TIF文件
-        filename = f"{crop}_{fert}_{appl}.tif"
+        # 保存TIF文件，文件名包含来源标识
+        filename = f"{crop}_{source_name}_{fert}_{appl}.tif"
         output_path = output_dir / filename
 
         with rasterio.open(output_path, "w", **output_profile) as dst:

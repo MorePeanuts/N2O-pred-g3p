@@ -553,8 +553,8 @@ def predict_tif_data(
 
     # 遍历所有组合进行预测
     progress_bar = tqdm(combinations, desc="预测进度")
-    for idx, (crop, fert, appl) in enumerate(progress_bar, 1):
-        combination_name = f"{crop}_{fert}_{appl}"
+    for idx, (crop, fert, appl, source) in enumerate(progress_bar, 1):
+        combination_name = f"{crop}_{source}_{fert}_{appl}"
         combination_start_time = time.time()
 
         # 更新进度条描述
@@ -564,7 +564,7 @@ def predict_tif_data(
         logger.info(f"[{idx}/{len(combinations)}] 正在加载 {combination_name} 数据...")
         dataset_start_time = time.time()
         dataset = tif_loader.create_rnn_dataset(
-            crop, fert, appl, predictor.scalers, model_type=predictor.model_type
+            crop, fert, appl, source, predictor.scalers, model_type=predictor.model_type
         )
         dataset_load_time = time.time() - dataset_start_time
 
@@ -641,6 +641,7 @@ def predict_tif_data(
             crop,
             fert,
             appl,
+            source,
             output_dir,
         )
 
