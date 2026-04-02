@@ -1,7 +1,6 @@
-BASE_OUTPUT="predictions-2-0322-model-1-6"
+BASE_OUTPUT="predictions-model-1949-5"
 
-for year in {2000..2020}
-do
+for year in {2000..2020}; do
   echo "正在处理年份：$year"
   mkdir -p "$BASE_OUTPUT/$year"
   n2o-pred predict \
@@ -15,4 +14,3 @@ do
 done
 
 echo "done!"
-

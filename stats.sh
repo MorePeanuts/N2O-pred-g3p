@@ -1,0 +1,3 @@
+uv run utils/ensemble_tif.py \
+  --inputs predictions-model-859-0 predictions-model-859-1 predictions-model-859-2 predictions-model-859-3 predictions-model-859-4 predictions-model-1949-0 predictions-model-1949-1 predictions-model-1949-2 predictions-model-1949-3 predictions-model-1949-4 predictions-model-2869-0 predictions-model-2869-1 predictions-model-2869-2 predictions-model-2869-3 predictions-model-2869-4 predictions-model-8033-0 predictions-model-8033-1 predictions-model-8033-2 predictions-model-8033-3 predictions-model-8033-4 predictions-model-8294-0 predictions-model-8294-1 predictions-model-8294-2 predictions-model-8294-3 predictions-model-8294-4 \
+  --output stats-predictions-5_5
