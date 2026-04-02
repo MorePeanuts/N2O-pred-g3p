@@ -316,9 +316,11 @@ class N2OPredictor:
         self.model = self.model.to(device)
         self.model.eval()
 
-        all_predictions = []
-        all_targets = []
-        predictions_by_seq = []  # 按序列组织的预测结果（只包含真实测量点）
+        all_predictions = []          # 所有时间点的预测（用于与flatten_to_dataframe对齐）
+        all_predictions_masked = []   # 仅真实测量点（用于计算metrics）
+        all_targets_masked = []
+        predictions_by_seq = []       # 按序列组织的预测结果（只包含真实测量点）
+        all_masks = []                # 记录每个点是否是真实测量点
 
         with torch.no_grad():
             for batch in loader:
@@ -349,18 +351,24 @@ class N2OPredictor:
                     # 逆转换
                     pred_orig = dataset.inverse_transform_targets(pred_scaled)
 
-                    # 只保留真实测量点
-                    all_predictions.extend(pred_orig[mask_i])
-                    all_targets.extend(target_orig[mask_i])
+                    # 保存所有时间点的预测（与flatten_to_dataframe对齐）
+                    all_predictions.extend(pred_orig)
+                    all_masks.extend(mask_i)
+
+                    # 只保留真实测量点用于计算metrics
+                    all_predictions_masked.extend(pred_orig[mask_i])
+                    all_targets_masked.extend(target_orig[mask_i])
                     predictions_by_seq.append(list(pred_orig[mask_i]))
 
         predictions = np.array(all_predictions)
-        targets = np.array(all_targets)
+        predictions_masked = np.array(all_predictions_masked)
+        targets_masked = np.array(all_targets_masked)
+        masks = np.array(all_masks)
 
         # 检查是否有有效的标签
-        has_labels = not np.all(targets == 0)
+        has_labels = not np.all(targets_masked == 0)
         if has_labels:
-            metrics = compute_metrics(targets, predictions)
+            metrics = compute_metrics(targets_masked, predictions_masked)
         else:
             metrics = None
 
@@ -373,9 +381,10 @@ class N2OPredictor:
 
         return {
             "predictions": predictions,
-            "targets": targets if has_labels else None,
+            "targets": targets_masked if has_labels else None,
             "metrics": metrics,
             "data_with_predictions": predicted_dataset,
+            "masks": masks,  # 可选：返回掩码供后续使用
         }
 
 
@@ -438,7 +447,11 @@ def predict_with_model(
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 保存带预测值的数据
+        # 创建 tables 目录（类似训练时的结构）
+        tables_dir = output_path.parent / "tables"
+        tables_dir.mkdir(parents=True, exist_ok=True)
+
+        # 保存带预测值的数据（原始格式）
         if is_sequence_data:
             # 保存为pkl文件
             if output_path.suffix != ".pkl":
@@ -453,35 +466,47 @@ def predict_with_model(
             results["data_with_predictions"].to_csv(output_path, index=False)
             logger.info(f"带预测值的表格数据已保存到 {output_path}")
 
-        # 额外保存预测结果的CSV（用于快速查看，包含定位信息）
-        metrics_output = output_path.parent / f"{output_path.stem}_predictions.csv"
+        # 保存预测结果到 tables/predictions.csv（使用与训练时相同的格式）
+        from .evaluation import save_predictions_to_csv
 
-        # 构建包含定位信息的预测结果DataFrame
-        pred_df = pd.DataFrame()
-
-        # 添加定位信息
+        # 构建额外的列（定位信息）
+        additional_cols = {}
         if "No. of obs" in data_df_for_location.columns:
-            pred_df["No. of obs"] = data_df_for_location["No. of obs"].values
+            additional_cols["No. of obs"] = data_df_for_location["No. of obs"].values
         if "Publication" in data_df_for_location.columns:
-            pred_df["Publication"] = data_df_for_location["Publication"].values
+            additional_cols["Publication"] = data_df_for_location["Publication"].values
         if "control_group" in data_df_for_location.columns:
-            pred_df["control_group"] = data_df_for_location["control_group"].values
+            additional_cols["control_group"] = data_df_for_location["control_group"].values
         if "sowdur" in data_df_for_location.columns:
-            pred_df["sowdur"] = data_df_for_location["sowdur"].values
+            additional_cols["sowdur"] = data_df_for_location["sowdur"].values
 
-        # 添加预测值和真实值
-        pred_df["predicted"] = results["predictions"]
-        if results["targets"] is not None:
-            pred_df["actual"] = results["targets"]
-            pred_df["error"] = results["targets"] - results["predictions"]
-            pred_df["abs_error"] = np.abs(results["targets"] - results["predictions"])
-        else:
-            pred_df["actual"] = np.nan
-            pred_df["error"] = np.nan
-            pred_df["abs_error"] = np.nan
+        # 如果没有 targets，创建一个全为 NaN 的数组
+        targets_for_csv = (
+            results["targets"] if results["targets"] is not None else np.full_like(results["predictions"], np.nan)
+        )
 
-        pred_df.to_csv(metrics_output, index=False)
-        logger.info(f"预测结果摘要已保存到 {metrics_output}")
+        save_predictions_to_csv(
+            results["predictions"],
+            targets_for_csv,
+            tables_dir / "predictions.csv",
+            additional_cols=additional_cols if additional_cols else None,
+        )
+        logger.info(f"预测结果已保存到 {tables_dir / 'predictions.csv'}")
+
+        # 对于 RF 模型，保存特征重要性
+        if predictor.model_type == "rf" and hasattr(predictor.model, "get_feature_importances"):
+            try:
+                feature_importances = predictor.model.get_feature_importances()
+                importance_df = pd.DataFrame(
+                    {
+                        "feature": list(feature_importances.keys()),
+                        "importance": list(feature_importances.values()),
+                    }
+                ).sort_values("importance", ascending=False)
+                importance_df.to_csv(tables_dir / "feature_importance.csv", index=False)
+                logger.info(f"特征重要性已保存到 {tables_dir / 'feature_importance.csv'}")
+            except Exception as e:
+                logger.warning(f"保存特征重要性失败: {e}")
 
     return results
 
