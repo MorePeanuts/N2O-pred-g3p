@@ -317,6 +317,7 @@ class N2OPredictor:
         self.model.eval()
 
         all_predictions = []          # 所有时间点的预测（用于与flatten_to_dataframe对齐）
+        all_targets = []              # 所有时间点的targets（非测量点用NaN填充）
         all_predictions_masked = []   # 仅真实测量点（用于计算metrics）
         all_targets_masked = []
         predictions_by_seq = []       # 按序列组织的预测结果（只包含真实测量点）
@@ -351,8 +352,11 @@ class N2OPredictor:
                     # 逆转换
                     pred_orig = dataset.inverse_transform_targets(pred_scaled)
 
-                    # 保存所有时间点的预测（与flatten_to_dataframe对齐）
+                    # 保存所有时间点的预测和targets（与flatten_to_dataframe对齐）
                     all_predictions.extend(pred_orig)
+                    # 非测量点的target用NaN填充
+                    target_full = np.where(mask_i, target_orig, np.nan)
+                    all_targets.extend(target_full)
                     all_masks.extend(mask_i)
 
                     # 只保留真实测量点用于计算metrics
@@ -361,6 +365,7 @@ class N2OPredictor:
                     predictions_by_seq.append(list(pred_orig[mask_i]))
 
         predictions = np.array(all_predictions)
+        targets_full = np.array(all_targets)
         predictions_masked = np.array(all_predictions_masked)
         targets_masked = np.array(all_targets_masked)
         masks = np.array(all_masks)
@@ -381,7 +386,8 @@ class N2OPredictor:
 
         return {
             "predictions": predictions,
-            "targets": targets_masked if has_labels else None,
+            "targets": targets_full if has_labels else None,
+            "targets_masked": targets_masked if has_labels else None,
             "metrics": metrics,
             "data_with_predictions": predicted_dataset,
             "masks": masks,  # 可选：返回掩码供后续使用
