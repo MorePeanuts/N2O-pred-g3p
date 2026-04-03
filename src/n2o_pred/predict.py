@@ -39,59 +39,59 @@ class N2OPredictor:
         self.model_dir = Path(model_dir)
 
         if not self.model_dir.exists():
-            raise FileNotFoundError(f"模型目录不存在: {self.model_dir}")
+            raise FileNotFoundError(f'模型目录不存在: {self.model_dir}')
 
         # 加载配置
-        config_path = self.model_dir / "config.json"
+        config_path = self.model_dir / 'config.json'
         if not config_path.exists():
-            raise FileNotFoundError(f"配置文件不存在: {config_path}")
+            raise FileNotFoundError(f'配置文件不存在: {config_path}')
 
         self.config = load_json(config_path)
 
         # 确定模型类型（从父目录的summary.json获取）
-        summary_path = self.model_dir.parent / "summary.json"
+        summary_path = self.model_dir.parent / 'summary.json'
         if summary_path.exists():
             summary = load_json(summary_path)
-            self.model_type = summary["model_type"]
+            self.model_type = summary['model_type']
         else:
             # 尝试从配置推断
-            if "rnn_type" in self.config:
+            if 'rnn_type' in self.config:
                 # 需要额外信息确定是obs还是daily
-                logger.warning("无法从summary.json确定模型类型，请手动指定")
-                self.model_type = "rnn-obs"  # 默认
+                logger.warning('无法从summary.json确定模型类型，请手动指定')
+                self.model_type = 'rnn-obs'  # 默认
             else:
-                self.model_type = "rf"
+                self.model_type = 'rf'
 
-        logger.info(f"加载模型类型: {self.model_type}")
+        logger.info(f'加载模型类型: {self.model_type}')
 
         # 加载模型
         self.model = self._load_model()
 
         # 加载预处理器（RNN需要）
-        if self.model_type.startswith("rnn"):
-            scalers_path = self.model_dir / "scalers.pkl"
+        if self.model_type.startswith('rnn'):
+            scalers_path = self.model_dir / 'scalers.pkl'
             if scalers_path.exists():
-                with open(scalers_path, "rb") as f:
+                with open(scalers_path, 'rb') as f:
                     self.scalers = pickle.load(f)
             else:
-                logger.warning("未找到scalers.pkl，预测可能失败")
+                logger.warning('未找到scalers.pkl，预测可能失败')
                 self.scalers = None
 
     def _load_model(self) -> Any:
         """加载模型"""
-        if self.model_type == "rf":
-            model_path = self.model_dir / "model.pkl"
+        if self.model_type == 'rf':
+            model_path = self.model_dir / 'model.pkl'
             if not model_path.exists():
-                raise FileNotFoundError(f"模型文件不存在: {model_path}")
+                raise FileNotFoundError(f'模型文件不存在: {model_path}')
             return N2OPredictorRF.load(model_path)
 
         else:  # RNN模型
-            model_path = self.model_dir / "best_model.pt"
+            model_path = self.model_dir / 'best_model.pt'
             if not model_path.exists():
                 # 尝试另一个可能的路径
-                model_path = self.model_dir / "model.pt"
+                model_path = self.model_dir / 'model.pt'
                 if not model_path.exists():
-                    raise FileNotFoundError(f"模型文件不存在")
+                    raise FileNotFoundError(f'模型文件不存在')
 
             # 加载编码器以获取cardinality
             from .preprocessing import (
@@ -99,8 +99,8 @@ class N2OPredictor:
                 CATEGORICAL_DYNAMIC_FEATURES,
             )
 
-            encoders_path = Path(__file__).parents[2] / "preprocessor" / "encoders.pkl"
-            with open(encoders_path, "rb") as f:
+            encoders_path = Path(__file__).parents[2] / 'preprocessor' / 'encoders.pkl'
+            with open(encoders_path, 'rb') as f:
                 encoders = pickle.load(f)
 
             categorical_static_cardinalities = [
@@ -111,7 +111,7 @@ class N2OPredictor:
             ]
 
             # 确定动态特征数量
-            if self.model_type == "rnn-obs":
+            if self.model_type == 'rnn-obs':
                 num_dynamic_numeric = 7  # 包含time_delta
             else:
                 num_dynamic_numeric = 6
@@ -122,19 +122,19 @@ class N2OPredictor:
                 num_numeric_dynamic=num_dynamic_numeric,
                 categorical_static_cardinalities=categorical_static_cardinalities,
                 categorical_dynamic_cardinalities=categorical_dynamic_cardinalities,
-                embedding_dim=self.config.get("embedding_dim", 8),
-                hidden_size=self.config.get("hidden_size", 96),
-                num_layers=self.config.get("num_layers", 2),
-                rnn_type=self.config.get("rnn_type", "GRU"),
-                dropout=self.config.get("dropout", 0.2),
+                embedding_dim=self.config.get('embedding_dim', 8),
+                hidden_size=self.config.get('hidden_size', 96),
+                num_layers=self.config.get('num_layers', 2),
+                rnn_type=self.config.get('rnn_type', 'GRU'),
+                dropout=self.config.get('dropout', 0.2),
             )
 
             # 加载权重
-            if str(model_path).endswith("best_model.pt"):
-                checkpoint = torch.load(model_path, map_location="cpu")
-                model.load_state_dict(checkpoint["model_state_dict"])
+            if str(model_path).endswith('best_model.pt'):
+                checkpoint = torch.load(model_path, map_location='cpu')
+                model.load_state_dict(checkpoint['model_state_dict'])
             else:
-                model.load_state_dict(torch.load(model_path, map_location="cpu"))
+                model.load_state_dict(torch.load(model_path, map_location='cpu'))
 
             model.eval()
             return model
@@ -142,7 +142,7 @@ class N2OPredictor:
     def predict(
         self,
         data: BaseN2ODataset | pd.DataFrame,
-        device: str = "cpu",
+        device: str = 'cpu',
         batch_size: int = 32,
     ) -> dict[str, Any]:
         """
@@ -156,14 +156,14 @@ class N2OPredictor:
         Returns:
             预测结果字典
         """
-        if self.model_type == "rf":
+        if self.model_type == 'rf':
             return self._predict_rf(data)
-        elif self.model_type == "rnn-obs":
+        elif self.model_type == 'rnn-obs':
             return self._predict_rnn_obs(data, device, batch_size)
-        elif self.model_type == "rnn-daily":
+        elif self.model_type == 'rnn-daily':
             return self._predict_rnn_daily(data, device, batch_size)
         else:
-            raise ValueError(f"不支持的模型类型: {self.model_type}")
+            raise ValueError(f'不支持的模型类型: {self.model_type}')
 
     def _predict_rf(self, data: pd.DataFrame | BaseN2ODataset) -> dict[str, Any]:
         """随机森林预测"""
@@ -191,28 +191,28 @@ class N2OPredictor:
 
         # 添加预测值到DataFrame
         data_df_with_pred = data_df.copy()
-        data_df_with_pred["predicted_daily_fluxes"] = predictions
+        data_df_with_pred['predicted_daily_fluxes'] = predictions
 
         # 如果输入是BaseN2ODataset，转换回序列格式并添加预测字段
         if is_base_dataset:
             predicted_dataset = BaseN2ODataset.from_dataframe(data_df_with_pred)
             # 为每个序列添加预测值
             for i, seq in enumerate(predicted_dataset.sequences):
-                seq["predicted_targets"] = seq["targets"]  # 重命名原来的targets为predicted_targets
+                seq['predicted_targets'] = seq['targets']  # 重命名原来的targets为predicted_targets
                 # 从DataFrame中提取该序列的预测值
                 seq_pred = data_df_with_pred[
-                    (data_df_with_pred["Publication"] == seq["seq_id"][0])
-                    & (data_df_with_pred["control_group"] == seq["seq_id"][1])
-                ]["predicted_daily_fluxes"].values
-                seq["predicted_targets"] = list(seq_pred)
+                    (data_df_with_pred['Publication'] == seq['seq_id'][0])
+                    & (data_df_with_pred['control_group'] == seq['seq_id'][1])
+                ]['predicted_daily_fluxes'].values
+                seq['predicted_targets'] = list(seq_pred)
         else:
             predicted_dataset = data_df_with_pred
 
         return {
-            "predictions": predictions,
-            "targets": targets,
-            "metrics": metrics,
-            "data_with_predictions": predicted_dataset,
+            'predictions': predictions,
+            'targets': targets,
+            'metrics': metrics,
+            'data_with_predictions': predicted_dataset,
         }
 
     def _predict_rnn_obs(
@@ -220,15 +220,13 @@ class N2OPredictor:
     ) -> dict[str, Any]:
         """观测步长RNN预测"""
         if not isinstance(data, BaseN2ODataset):
-            raise TypeError("RNN模型需要BaseN2ODataset格式的数据")
+            raise TypeError('RNN模型需要BaseN2ODataset格式的数据')
 
         # 创建数据集
         dataset = N2ODatasetForObsStepRNN(data, fit_scalers=False, scalers=self.scalers)
 
         # 创建数据加载器
-        loader = DataLoader(
-            dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn
-        )
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
 
         # 预测
         device = torch.device(device)
@@ -241,12 +239,12 @@ class N2OPredictor:
 
         with torch.no_grad():
             for batch in loader:
-                static_numeric = batch["static_numeric"].to(device)
-                dynamic_numeric = batch["dynamic_numeric"].to(device)
-                static_categorical = batch["static_categorical"].to(device)
-                dynamic_categorical = batch["dynamic_categorical"].to(device)
-                seq_lengths = batch["seq_lengths"].to(device)
-                targets_original = batch["targets_original"]
+                static_numeric = batch['static_numeric'].to(device)
+                dynamic_numeric = batch['dynamic_numeric'].to(device)
+                static_categorical = batch['static_categorical'].to(device)
+                dynamic_categorical = batch['dynamic_categorical'].to(device)
+                seq_lengths = batch['seq_lengths'].to(device)
+                targets_original = batch['targets_original']
 
                 predictions = self.model(
                     static_numeric,
@@ -284,14 +282,14 @@ class N2OPredictor:
         predicted_dataset = BaseN2ODataset(sequences=[])
         for i, seq in enumerate(data.sequences):
             new_seq = seq.copy()
-            new_seq["predicted_targets"] = predictions_by_seq[i]
+            new_seq['predicted_targets'] = predictions_by_seq[i]
             predicted_dataset.sequences.append(new_seq)
 
         return {
-            "predictions": predictions,
-            "targets": targets if has_labels else None,
-            "metrics": metrics,
-            "data_with_predictions": predicted_dataset,
+            'predictions': predictions,
+            'targets': targets if has_labels else None,
+            'metrics': metrics,
+            'data_with_predictions': predicted_dataset,
         }
 
     def _predict_rnn_daily(
@@ -299,39 +297,35 @@ class N2OPredictor:
     ) -> dict[str, Any]:
         """每日步长RNN预测"""
         if not isinstance(data, BaseN2ODataset):
-            raise TypeError("RNN模型需要BaseN2ODataset格式的数据")
+            raise TypeError('RNN模型需要BaseN2ODataset格式的数据')
 
         # 创建数据集
-        dataset = N2ODatasetForDailyStepRNN(
-            data, fit_scalers=False, scalers=self.scalers
-        )
+        dataset = N2ODatasetForDailyStepRNN(data, fit_scalers=False, scalers=self.scalers)
 
         # 创建数据加载器
-        loader = DataLoader(
-            dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn
-        )
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
 
         # 预测
         device = torch.device(device)
         self.model = self.model.to(device)
         self.model.eval()
 
-        all_predictions = []          # 所有时间点的预测（用于与flatten_to_dataframe对齐）
-        all_targets = []              # 所有时间点的targets（非测量点用NaN填充）
-        all_predictions_masked = []   # 仅真实测量点（用于计算metrics）
+        all_predictions = []  # 所有时间点的预测（用于与flatten_to_dataframe对齐）
+        all_targets = []  # 所有时间点的targets（非测量点用NaN填充）
+        all_predictions_masked = []  # 仅真实测量点（用于计算metrics）
         all_targets_masked = []
-        predictions_by_seq = []       # 按序列组织的预测结果（只包含真实测量点）
-        all_masks = []                # 记录每个点是否是真实测量点
+        predictions_by_seq = []  # 按序列组织的预测结果（只包含真实测量点）
+        all_masks = []  # 记录每个点是否是真实测量点
 
         with torch.no_grad():
             for batch in loader:
-                static_numeric = batch["static_numeric"].to(device)
-                dynamic_numeric = batch["dynamic_numeric"].to(device)
-                static_categorical = batch["static_categorical"].to(device)
-                dynamic_categorical = batch["dynamic_categorical"].to(device)
-                seq_lengths = batch["seq_lengths"].to(device)
-                targets_original = batch["targets_original"]
-                mask = batch["mask"]
+                static_numeric = batch['static_numeric'].to(device)
+                dynamic_numeric = batch['dynamic_numeric'].to(device)
+                static_categorical = batch['static_categorical'].to(device)
+                dynamic_categorical = batch['dynamic_categorical'].to(device)
+                seq_lengths = batch['seq_lengths'].to(device)
+                targets_original = batch['targets_original']
+                mask = batch['mask']
 
                 predictions = self.model(
                     static_numeric,
@@ -381,16 +375,16 @@ class N2OPredictor:
         predicted_dataset = BaseN2ODataset(sequences=[])
         for i, seq in enumerate(data.sequences):
             new_seq = seq.copy()
-            new_seq["predicted_targets"] = predictions_by_seq[i]
+            new_seq['predicted_targets'] = predictions_by_seq[i]
             predicted_dataset.sequences.append(new_seq)
 
         return {
-            "predictions": predictions,
-            "targets": targets_full if has_labels else None,
-            "targets_masked": targets_masked if has_labels else None,
-            "metrics": metrics,
-            "data_with_predictions": predicted_dataset,
-            "masks": masks,  # 可选：返回掩码供后续使用
+            'predictions': predictions,
+            'targets': targets_full if has_labels else None,
+            'targets_masked': targets_masked if has_labels else None,
+            'metrics': metrics,
+            'data_with_predictions': predicted_dataset,
+            'masks': masks,  # 可选：返回掩码供后续使用
         }
 
 
@@ -398,122 +392,268 @@ def predict_with_model(
     model_dir: Path | str,
     data_path: Path | str,
     output_path: Path | str | None = None,
-    device: str = "cpu",
+    device: str = 'cpu',
 ) -> dict[str, Any]:
     """
-    使用训练好的模型进行预测的便捷函数
+    使用训练好的模型进行在对应的数据集划分上进行预测的便捷函数
 
     Args:
-        model_dir: 模型目录
-        data_path: 数据路径（.pkl或.csv文件）
-        output_path: 输出路径（保存带预测结果的数据）
+        model_dir: 模型目录（一定是`split_xxx`的格式，其中xxx是训练模型时进行data split的随机种子）
+        data_path: 数据路径
+        output_path: 输出路径（保存带预测结果的数据，包括feature_importance.csv, test_predictions.csv, train_predictions.csv, val_predictions.csv）
         device: 设备
 
     Returns:
         预测结果
     """
-    # 加载预测器
-    predictor = N2OPredictor(model_dir)
-
-    # 加载数据
+    model_dir = Path(model_dir)
     data_path = Path(data_path)
-    if data_path.suffix == ".pkl":
-        # 假设是序列数据
-        with open(data_path, "rb") as f:
-            sequences = pickle.load(f)
-        data = BaseN2ODataset(sequences)
-        is_sequence_data = True
-        # 将序列数据转换为DataFrame以获取定位信息
-        # RF模型使用专用的flatten方法
-        if predictor.model_type == "rf":
-            data_df_for_location = data.flatten_to_dataframe_for_rf()
-        else:
-            data_df_for_location = data.flatten_to_dataframe()
-    elif data_path.suffix == ".csv":
-        # 假设是DataFrame
-        data = pd.read_csv(data_path)
-        is_sequence_data = False
-        data_df_for_location = data.copy()
+
+    # 1. 从模型目录名提取种子
+    if not model_dir.name.startswith('split_'):
+        raise ValueError(f'模型目录名必须以split_开头: {model_dir.name}')
+    seed = int(model_dir.name.split('_')[1])
+    logger.info(f'提取到数据分割种子: {seed}')
+
+    # 2. 确定输出路径
+    if output_path is None:
+        output_path = model_dir
     else:
-        raise ValueError(f"不支持的数据格式: {data_path.suffix}")
-
-    logger.info(f"从 {data_path} 加载数据")
-
-    # 预测
-    results = predictor.predict(data, device=device)
-
-    logger.info(f"预测完成")
-    if results["metrics"]:
-        logger.info(f"评估指标: {results['metrics']}")
-    else:
-        logger.info("未提供标签，跳过评估指标计算")
-
-    # 保存结果
-    if output_path:
         output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.mkdir(parents=True, exist_ok=True)
+    tables_dir = output_path / 'tables'
+    tables_dir.mkdir(exist_ok=True)
 
-        # 创建 tables 目录（类似训练时的结构）
-        tables_dir = output_path.parent / "tables"
-        tables_dir.mkdir(parents=True, exist_ok=True)
+    # 3. 加载预测器
+    predictor = N2OPredictor(model_dir)
+    model_type = predictor.model_type
+    logger.info(f'模型类型: {model_type}')
 
-        # 保存带预测值的数据（原始格式）
-        if is_sequence_data:
-            # 保存为pkl文件
-            if output_path.suffix != ".pkl":
-                output_path = output_path.with_suffix(".pkl")
-            with open(output_path, "wb") as f:
-                pickle.dump(results["data_with_predictions"].sequences, f)
-            logger.info(f"带预测值的序列数据已保存到 {output_path}")
-        else:
-            # 保存为csv文件
-            if output_path.suffix != ".csv":
-                output_path = output_path.with_suffix(".csv")
-            results["data_with_predictions"].to_csv(output_path, index=False)
-            logger.info(f"带预测值的表格数据已保存到 {output_path}")
+    # 4. 加载数据并进行与训练时相同的划分
+    from sklearn.model_selection import train_test_split as sklearn_split
+    from .dataset import (
+        BaseN2ODataset,
+        N2ODatasetForDailyStepRNN,
+        N2ODatasetForObsStepRNN,
+    )
 
-        # 保存预测结果到 tables/predictions.csv（使用与训练时相同的格式）
+    logger.info(f'从 {data_path} 加载数据...')
+    if data_path.suffix == '.pkl':
+        with open(data_path, 'rb') as f:
+            base_dataset = pickle.load(f)
+    else:
+        # 尝试从默认路径加载
+        base_dataset = BaseN2ODataset()
+
+    # 进行数据划分（与训练时相同的逻辑）
+    n_sequences = len(base_dataset)
+    indices = list(range(n_sequences))
+
+    train_split = 0.8  # 默认训练集比例
+    test_ratio = (1.0 - train_split) / 2
+    train_val_indices, test_indices = sklearn_split(
+        indices, train_size=1.0 - test_ratio, random_state=seed
+    )
+
+    val_ratio = test_ratio / (1.0 - test_ratio)
+    train_indices, val_indices = sklearn_split(
+        train_val_indices, train_size=1.0 - val_ratio, random_state=seed
+    )
+
+    logger.info(f'数据集划分: {len(train_indices)} 训练, {len(val_indices)} 验证, {len(test_indices)} 测试')
+
+    train_base = base_dataset[train_indices]
+    val_base = base_dataset[val_indices]
+    test_base = base_dataset[test_indices]
+
+    # 5. 根据模型类型进行预测
+    results = {}
+
+    if model_type == 'rf':
+        # 随机森林预测
+        train_df = train_base.flatten_to_dataframe_for_rf()
+        val_df = val_base.flatten_to_dataframe_for_rf()
+        test_df = test_base.flatten_to_dataframe_for_rf()
+
+        train_result = predictor.predict(train_df, device=device)
+        val_result = predictor.predict(val_df, device=device)
+        test_result = predictor.predict(test_df, device=device)
+
+        # 保存预测结果
         from .evaluation import save_predictions_to_csv
 
-        # 构建额外的列（定位信息）
-        additional_cols = {}
-        if "No. of obs" in data_df_for_location.columns:
-            additional_cols["No. of obs"] = data_df_for_location["No. of obs"].values
-        if "Publication" in data_df_for_location.columns:
-            additional_cols["Publication"] = data_df_for_location["Publication"].values
-        if "control_group" in data_df_for_location.columns:
-            additional_cols["control_group"] = data_df_for_location["control_group"].values
-        if "sowdur" in data_df_for_location.columns:
-            additional_cols["sowdur"] = data_df_for_location["sowdur"].values
-
-        # 如果没有 targets，创建一个全为 NaN 的数组
-        targets_for_csv = (
-            results["targets"] if results["targets"] is not None else np.full_like(results["predictions"], np.nan)
+        save_predictions_to_csv(
+            train_result['predictions'],
+            train_result['targets'],
+            tables_dir / 'train_predictions.csv',
+            additional_cols={
+                'No. of obs': train_df['No. of obs'].values,
+                'Publication': train_df['Publication'].values,
+                'control_group': train_df['control_group'].values,
+                'sowdur': train_df['sowdur'].values,
+            },
         )
+        save_predictions_to_csv(
+            val_result['predictions'],
+            val_result['targets'],
+            tables_dir / 'val_predictions.csv',
+            additional_cols={
+                'No. of obs': val_df['No. of obs'].values,
+                'Publication': val_df['Publication'].values,
+                'control_group': val_df['control_group'].values,
+                'sowdur': val_df['sowdur'].values,
+            },
+        )
+        save_predictions_to_csv(
+            test_result['predictions'],
+            test_result['targets'],
+            tables_dir / 'test_predictions.csv',
+            additional_cols={
+                'No. of obs': test_df['No. of obs'].values,
+                'Publication': test_df['Publication'].values,
+                'control_group': test_df['control_group'].values,
+                'sowdur': test_df['sowdur'].values,
+            },
+        )
+
+        # 保存特征重要性
+        feature_importances = predictor.model.get_feature_importances()
+        importance_df = pd.DataFrame({
+            'feature': list(feature_importances.keys()),
+            'importance': list(feature_importances.values()),
+        }).sort_values('importance', ascending=False)
+        importance_df.to_csv(tables_dir / 'feature_importance.csv', index=False)
+
+        results = {
+            'train': train_result,
+            'val': val_result,
+            'test': test_result,
+            'feature_importances': feature_importances,
+        }
+
+    else:
+        # RNN模型预测
+        from .evaluation import save_predictions_to_csv
+
+        # 创建数据集
+        if model_type == 'rnn-obs':
+            train_dataset = N2ODatasetForObsStepRNN(train_base, fit_scalers=False, scalers=predictor.scalers)
+            val_dataset = N2ODatasetForObsStepRNN(val_base, fit_scalers=False, scalers=predictor.scalers)
+            test_dataset = N2ODatasetForObsStepRNN(test_base, fit_scalers=False, scalers=predictor.scalers)
+            use_mask = False
+        else:  # rnn-daily
+            train_dataset = N2ODatasetForDailyStepRNN(train_base, fit_scalers=False, scalers=predictor.scalers)
+            val_dataset = N2ODatasetForDailyStepRNN(val_base, fit_scalers=False, scalers=predictor.scalers)
+            test_dataset = N2ODatasetForDailyStepRNN(test_base, fit_scalers=False, scalers=predictor.scalers)
+            use_mask = True
+
+        # 预测
+        train_result = predictor.predict(train_base, device=device)
+        val_result = predictor.predict(val_base, device=device)
+        test_result = predictor.predict(test_base, device=device)
+
+        # 获取定位列
+        def _get_location_cols(base_data, rnn_dataset=None, use_mask=False):
+            if not use_mask:
+                df = base_data.flatten_to_dataframe()
+                return {
+                    'No. of obs': df['No. of obs'].values,
+                    'Publication': df['Publication'].values,
+                    'control_group': df['control_group'].values,
+                    'sowdur': df['sowdur'].values,
+                }
+            else:
+                no_of_obs_list = []
+                publication_list = []
+                control_group_list = []
+                sowdur_list = []
+
+                for seq_idx, seq in enumerate(base_data.sequences):
+                    seq_id = seq['seq_id']
+                    no_of_obs = seq['No. of obs']
+                    sowdurs = seq['sowdurs']
+
+                    if rnn_dataset is not None:
+                        daily_seq = rnn_dataset.daily_sequences[seq_idx]
+                        mask = daily_seq['mask']
+                        start_day = daily_seq['start_day']
+
+                        sowdur_to_orig_idx = {int(sowdurs[i]): i for i in range(len(sowdurs))}
+
+                        for day_idx in range(len(mask)):
+                            if mask[day_idx]:
+                                day = start_day + day_idx
+                                if day in sowdur_to_orig_idx:
+                                    orig_idx = sowdur_to_orig_idx[day]
+                                    no_of_obs_list.append(no_of_obs[orig_idx])
+                                    publication_list.append(seq_id[0])
+                                    control_group_list.append(seq_id[1])
+                                    sowdur_list.append(day)
+                    else:
+                        no_of_obs_list.extend(no_of_obs)
+                        publication_list.extend([seq_id[0]] * len(no_of_obs))
+                        control_group_list.extend([seq_id[1]] * len(no_of_obs))
+                        sowdur_list.extend(sowdurs)
+
+                return {
+                    'No. of obs': np.array(no_of_obs_list),
+                    'Publication': np.array(publication_list),
+                    'control_group': np.array(control_group_list),
+                    'sowdur': np.array(sowdur_list),
+                }
+
+        train_loc_cols = _get_location_cols(train_base, train_dataset if use_mask else None, use_mask=use_mask)
+        val_loc_cols = _get_location_cols(val_base, val_dataset if use_mask else None, use_mask=use_mask)
+        test_loc_cols = _get_location_cols(test_base, test_dataset if use_mask else None, use_mask=use_mask)
+
+        # 使用合适的targets
+        def get_targets_for_save(result):
+            if 'targets_masked' in result and result['targets_masked'] is not None:
+                return result['targets_masked']
+            return result['targets']
 
         save_predictions_to_csv(
-            results["predictions"],
-            targets_for_csv,
-            tables_dir / "predictions.csv",
-            additional_cols=additional_cols if additional_cols else None,
+            train_result['predictions'] if not use_mask else train_result['predictions'][train_result['masks']],
+            get_targets_for_save(train_result),
+            tables_dir / 'train_predictions.csv',
+            additional_cols=train_loc_cols,
         )
-        logger.info(f"预测结果已保存到 {tables_dir / 'predictions.csv'}")
+        save_predictions_to_csv(
+            val_result['predictions'] if not use_mask else val_result['predictions'][val_result['masks']],
+            get_targets_for_save(val_result),
+            tables_dir / 'val_predictions.csv',
+            additional_cols=val_loc_cols,
+        )
+        save_predictions_to_csv(
+            test_result['predictions'] if not use_mask else test_result['predictions'][test_result['masks']],
+            get_targets_for_save(test_result),
+            tables_dir / 'test_predictions.csv',
+            additional_cols=test_loc_cols,
+        )
 
-        # 对于 RF 模型，保存特征重要性
-        if predictor.model_type == "rf" and hasattr(predictor.model, "get_feature_importances"):
-            try:
-                feature_importances = predictor.model.get_feature_importances()
-                importance_df = pd.DataFrame(
-                    {
-                        "feature": list(feature_importances.keys()),
-                        "importance": list(feature_importances.values()),
-                    }
-                ).sort_values("importance", ascending=False)
-                importance_df.to_csv(tables_dir / "feature_importance.csv", index=False)
-                logger.info(f"特征重要性已保存到 {tables_dir / 'feature_importance.csv'}")
-            except Exception as e:
-                logger.warning(f"保存特征重要性失败: {e}")
+        # 尝试计算并保存SHAP特征重要性
+        try:
+            from .evaluation import compute_shap_values, plot_feature_importance
+            logger.info('计算特征重要性（使用SHAP）...')
+            shap_values, feature_names = compute_shap_values(
+                predictor.model, test_dataset, model_type, device, max_samples=100
+            )
+            importance_df = pd.DataFrame({
+                'feature': feature_names,
+                'importance': shap_values,
+            }).sort_values('importance', ascending=False)
+            importance_df.to_csv(tables_dir / 'feature_importance.csv', index=False)
+            results['feature_importances'] = dict(zip(feature_names, shap_values))
+        except Exception as e:
+            logger.warning(f'SHAP分析失败: {e}')
 
+        results = {
+            'train': train_result,
+            'val': val_result,
+            'test': test_result,
+        }
+
+    logger.info(f'预测结果已保存到 {tables_dir}')
     return results
 
 
@@ -521,7 +661,7 @@ def predict_tif_data(
     model_dir: Path | str,
     tif_dir: Path | str,
     output_dir: Path | str,
-    device: str = "cuda:0",
+    device: str = 'cuda:0',
     batch_size: int = 256,
 ) -> dict[str, Any]:
     """
@@ -546,16 +686,16 @@ def predict_tif_data(
     predictor = N2OPredictor(model_dir)
 
     # 检查模型类型
-    if not predictor.model_type.startswith("rnn"):
-        raise ValueError(f"TIF预测只支持RNN模型，当前模型类型: {predictor.model_type}")
+    if not predictor.model_type.startswith('rnn'):
+        raise ValueError(f'TIF预测只支持RNN模型，当前模型类型: {predictor.model_type}')
 
     # 加载TIF数据
-    logger.info(f"从 {tif_dir} 加载TIF数据...")
+    logger.info(f'从 {tif_dir} 加载TIF数据...')
     tif_loader = TifDataLoader(tif_dir)
 
     # 获取所有有效组合
     combinations = tif_loader.get_prediction_combinations()
-    logger.info(f"共 {len(combinations)} 个有效组合")
+    logger.info(f'共 {len(combinations)} 个有效组合')
 
     # 准备设备
     device_obj = torch.device(device)
@@ -571,28 +711,28 @@ def predict_tif_data(
 
     # 记录结果
     results = {
-        "model_dir": str(model_dir),
-        "tif_dir": str(tif_dir),
-        "output_dir": str(output_dir),
-        "total_combinations": len(combinations),
-        "completed_files": [],
-        "total_pixels_processed": 0,
+        'model_dir': str(model_dir),
+        'tif_dir': str(tif_dir),
+        'output_dir': str(output_dir),
+        'total_combinations': len(combinations),
+        'completed_files': [],
+        'total_pixels_processed': 0,
     }
 
     # 记录总开始时间
     total_start_time = time.time()
 
     # 遍历所有组合进行预测
-    progress_bar = tqdm(combinations, desc="预测进度")
+    progress_bar = tqdm(combinations, desc='预测进度')
     for idx, (crop, fert, appl, source) in enumerate(progress_bar, 1):
-        combination_name = f"{crop}_{source}_{fert}_{appl}"
+        combination_name = f'{crop}_{source}_{fert}_{appl}'
         combination_start_time = time.time()
 
         # 更新进度条描述
-        progress_bar.set_description(f"预测 [{idx}/{len(combinations)}] {combination_name}")
+        progress_bar.set_description(f'预测 [{idx}/{len(combinations)}] {combination_name}')
 
         # 创建数据集
-        logger.info(f"[{idx}/{len(combinations)}] 正在加载 {combination_name} 数据...")
+        logger.info(f'[{idx}/{len(combinations)}] 正在加载 {combination_name} 数据...')
         dataset_start_time = time.time()
         dataset = tif_loader.create_rnn_dataset(
             crop, fert, appl, source, predictor.scalers, model_type=predictor.model_type
@@ -600,11 +740,11 @@ def predict_tif_data(
         dataset_load_time = time.time() - dataset_start_time
 
         if len(dataset) == 0:
-            logger.warning(f"跳过空数据集: {combination_name}")
+            logger.warning(f'跳过空数据集: {combination_name}')
             continue
 
         n_pixels = len(dataset)
-        logger.info(f"  数据加载完成: {n_pixels} 像素, 耗时 {dataset_load_time:.1f}s")
+        logger.info(f'  数据加载完成: {n_pixels} 像素, 耗时 {dataset_load_time:.1f}s')
 
         # 创建数据加载器
         loader = DataLoader(
@@ -616,7 +756,7 @@ def predict_tif_data(
 
         # 计算批次数量
         n_batches = (n_pixels + batch_size - 1) // batch_size
-        logger.info(f"  共 {n_batches} 个批次 (batch_size={batch_size})")
+        logger.info(f'  共 {n_batches} 个批次 (batch_size={batch_size})')
 
         # 预测
         all_predictions = []
@@ -624,18 +764,16 @@ def predict_tif_data(
         with torch.no_grad():
             for batch_idx, batch in enumerate(loader, 1):
                 if batch_idx % 10 == 0 or batch_idx == n_batches:
-                    logger.info(f"  批次进度: {batch_idx}/{n_batches}")
-                static_numeric = batch["static_numeric"].to(device_obj)
-                dynamic_numeric = batch["dynamic_numeric"].to(device_obj)
-                static_categorical = batch["static_categorical"].to(device_obj)
-                dynamic_categorical = batch["dynamic_categorical"].to(device_obj)
+                    logger.info(f'  批次进度: {batch_idx}/{n_batches}')
+                static_numeric = batch['static_numeric'].to(device_obj)
+                dynamic_numeric = batch['dynamic_numeric'].to(device_obj)
+                static_categorical = batch['static_categorical'].to(device_obj)
+                dynamic_categorical = batch['dynamic_categorical'].to(device_obj)
 
                 # TIF数据集所有样本的序列长度相同
                 seq_len = dataset.n_days
                 batch_size_actual = len(static_numeric)
-                seq_lengths = torch.tensor(
-                    [seq_len] * batch_size_actual, device=device_obj
-                )
+                seq_lengths = torch.tensor([seq_len] * batch_size_actual, device=device_obj)
 
                 predictions = predictor.model(
                     static_numeric,
@@ -676,27 +814,29 @@ def predict_tif_data(
             output_dir,
         )
 
-        results["completed_files"].append(str(output_path))
-        results["total_pixels_processed"] += len(pixel_indices)
+        results['completed_files'].append(str(output_path))
+        results['total_pixels_processed'] += len(pixel_indices)
 
         # 计算用时
         combination_time = time.time() - combination_start_time
 
         # 显示详细信息
         logger.info(
-            f"[{idx}/{len(combinations)}] {combination_name}: "
-            f"{n_pixels} 像素, 耗时 {combination_time:.1f}s, "
-            f"累计 {results['total_pixels_processed']} 像素"
+            f'[{idx}/{len(combinations)}] {combination_name}: '
+            f'{n_pixels} 像素, 耗时 {combination_time:.1f}s, '
+            f'累计 {results["total_pixels_processed"]} 像素'
         )
 
     # 计算总用时
     total_time = time.time() - total_start_time
-    avg_time_per_combination = total_time / len(results['completed_files']) if results['completed_files'] else 0
+    avg_time_per_combination = (
+        total_time / len(results['completed_files']) if results['completed_files'] else 0
+    )
 
-    logger.info(f"\n预测完成！")
-    logger.info(f"  生成文件数: {len(results['completed_files'])}")
-    logger.info(f"  总处理像素数: {results['total_pixels_processed']}")
-    logger.info(f"  总耗时: {total_time:.1f}s ({total_time/60:.1f}min)")
-    logger.info(f"  平均每组合: {avg_time_per_combination:.1f}s")
+    logger.info(f'\n预测完成！')
+    logger.info(f'  生成文件数: {len(results["completed_files"])}')
+    logger.info(f'  总处理像素数: {results["total_pixels_processed"]}')
+    logger.info(f'  总耗时: {total_time:.1f}s ({total_time / 60:.1f}min)')
+    logger.info(f'  平均每组合: {avg_time_per_combination:.1f}s')
 
     return results
