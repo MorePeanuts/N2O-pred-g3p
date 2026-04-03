@@ -553,14 +553,41 @@ def predict_with_model(
             # 合并所有数据进行查找
             all_bases = [('train', train_base, train_result), ('val', val_base, val_result), ('test', test_base, test_result)]
 
+            # 打印前几个序列ID帮助调试
+            if len(train_base.sequences) > 0:
+                sample_seq = train_base.sequences[0]
+                sample_id = sample_seq['seq_id']
+                logger.debug(f'数据集中的序列ID示例: {sample_id}, 类型: ({type(sample_id[0]), type(sample_id[1])})')
+
             for seq_id_tuple in plot_sequences:
-                pub, cg = seq_id_tuple
+                pub_arg, cg_arg = seq_id_tuple
                 found = False
 
                 for split_name, base, result in all_bases:
                     # 在该数据集中查找序列
                     for seq_idx, seq in enumerate(base.sequences):
-                        if seq['seq_id'][0] == pub and seq['seq_id'][1] == cg:
+                        seq_pub, seq_cg = seq['seq_id']
+
+                        # 尝试类型转换来匹配
+                        pub_match = False
+                        cg_match = False
+
+                        # 尝试直接比较
+                        if seq_pub == pub_arg and seq_cg == cg_arg:
+                            pub_match = True
+                            cg_match = True
+                        else:
+                            # 尝试将参数转换为序列ID的类型
+                            try:
+                                pub_converted = type(seq_pub)(pub_arg)
+                                cg_converted = type(seq_cg)(cg_arg)
+                                if seq_pub == pub_converted and seq_cg == cg_converted:
+                                    pub_match = True
+                                    cg_match = True
+                            except (ValueError, TypeError):
+                                pass
+
+                        if pub_match and cg_match:
                             # 找到序列，现在需要获取预测值
                             time_steps = np.array(seq['sowdurs'])
                             targets = np.array(seq['targets'])
@@ -569,29 +596,47 @@ def predict_with_model(
                             data_with_preds = result['data_with_predictions']
                             pred_seq = None
                             for s in data_with_preds.sequences:
-                                if s['seq_id'][0] == pub and s['seq_id'][1] == cg:
+                                s_pub, s_cg = s['seq_id']
+                                # 同样尝试类型转换
+                                if (s_pub == seq_pub and s_cg == seq_cg):
                                     pred_seq = s
                                     break
+                                else:
+                                    try:
+                                        if (type(s_pub)(seq_pub) == s_pub and type(s_cg)(seq_cg) == s_cg):
+                                            pred_seq = s
+                                            break
+                                    except (ValueError, TypeError):
+                                        pass
 
                             if pred_seq is not None and 'predicted_targets' in pred_seq:
                                 predictions = np.array(pred_seq['predicted_targets'])
 
+                                # 使用原始序列ID作为文件名
+                                filename_pub = str(seq_pub).replace('/', '_').replace('\\', '_')
+                                filename_cg = str(seq_cg).replace('/', '_').replace('\\', '_')
+
                                 plot_sequence_predictions(
-                                    seq_id_tuple,
+                                    (seq_pub, seq_cg),
                                     time_steps,
                                     targets,
                                     predictions,
-                                    figs_dir / f'sequence_predictions_{pub}_{cg}.png',
+                                    figs_dir / f'sequence_predictions_{filename_pub}_{filename_cg}.png',
                                     mask=None,
                                 )
-                                logger.info(f'已绘制序列预测图: {pub}_{cg} ({split_name}集)')
+                                logger.info(f'已绘制序列预测图: {seq_pub}_{seq_cg} ({split_name}集)')
                                 found = True
                                 break
                     if found:
                         break
 
                 if not found:
-                    logger.warning(f'未找到序列: {pub}_{cg}')
+                    # 列出所有可用的序列ID帮助调试
+                    available_ids = []
+                    for split_name, base, _ in all_bases:
+                        for seq in base.sequences[:10]:  # 只显示前10个
+                            available_ids.append(f"{seq['seq_id']}")
+                    logger.warning(f'未找到序列: {pub_arg}_{cg_arg}。部分可用序列ID: {", ".join(available_ids)}...')
 
         results.update({
             'train_metrics': train_result['metrics'],
@@ -718,43 +763,88 @@ def predict_with_model(
                 ('test', test_base, test_dataset, test_result),
             ]
 
+            # 打印前几个序列ID帮助调试
+            if len(train_base.sequences) > 0:
+                sample_seq = train_base.sequences[0]
+                sample_id = sample_seq['seq_id']
+                logger.debug(f'数据集中的序列ID示例: {sample_id}, 类型: ({type(sample_id[0]), type(sample_id[1])})')
+
             for seq_id_tuple in plot_sequences:
-                pub, cg = seq_id_tuple
+                pub_arg, cg_arg = seq_id_tuple
                 found = False
 
                 for split_name, base, dataset, result in all_bases:
                     # 在该数据集中查找序列
                     for seq_idx, seq in enumerate(base.sequences):
-                        if seq['seq_id'][0] == pub and seq['seq_id'][1] == cg:
+                        seq_pub, seq_cg = seq['seq_id']
+
+                        # 尝试类型转换来匹配
+                        pub_match = False
+                        cg_match = False
+
+                        # 尝试直接比较
+                        if seq_pub == pub_arg and seq_cg == cg_arg:
+                            pub_match = True
+                            cg_match = True
+                        else:
+                            # 尝试将参数转换为序列ID的类型
+                            try:
+                                pub_converted = type(seq_pub)(pub_arg)
+                                cg_converted = type(seq_cg)(cg_arg)
+                                if seq_pub == pub_converted and seq_cg == cg_converted:
+                                    pub_match = True
+                                    cg_match = True
+                            except (ValueError, TypeError):
+                                pass
+
+                        if pub_match and cg_match:
                             # 找到序列，从data_with_predictions中获取预测值
                             data_with_preds = result['data_with_predictions']
                             pred_seq = None
                             for s in data_with_preds.sequences:
-                                if s['seq_id'][0] == pub and s['seq_id'][1] == cg:
+                                s_pub, s_cg = s['seq_id']
+                                # 同样尝试类型转换
+                                if (s_pub == seq_pub and s_cg == seq_cg):
                                     pred_seq = s
                                     break
+                                else:
+                                    try:
+                                        if (type(s_pub)(seq_pub) == s_pub and type(s_cg)(seq_cg) == s_cg):
+                                            pred_seq = s
+                                            break
+                                    except (ValueError, TypeError):
+                                        pass
 
                             if pred_seq is not None and 'predicted_targets' in pred_seq:
                                 predictions = np.array(pred_seq['predicted_targets'])
                                 time_steps = np.array(seq['sowdurs'])
                                 targets = np.array(seq['targets'])
 
+                                # 使用原始序列ID作为文件名
+                                filename_pub = str(seq_pub).replace('/', '_').replace('\\', '_')
+                                filename_cg = str(seq_cg).replace('/', '_').replace('\\', '_')
+
                                 plot_sequence_predictions(
-                                    seq_id_tuple,
+                                    (seq_pub, seq_cg),
                                     time_steps,
                                     targets,
                                     predictions,
-                                    figs_dir / f'sequence_predictions_{pub}_{cg}.png',
+                                    figs_dir / f'sequence_predictions_{filename_pub}_{filename_cg}.png',
                                     mask=None,
                                 )
-                                logger.info(f'已绘制序列预测图: {pub}_{cg} ({split_name}集)')
+                                logger.info(f'已绘制序列预测图: {seq_pub}_{seq_cg} ({split_name}集)')
                                 found = True
                                 break
                     if found:
                         break
 
                 if not found:
-                    logger.warning(f'未找到序列: {pub}_{cg}')
+                    # 列出所有可用的序列ID帮助调试
+                    available_ids = []
+                    for split_name, base, _, _ in all_bases:
+                        for seq in base.sequences[:10]:  # 只显示前10个
+                            available_ids.append(f"{seq['seq_id']}")
+                    logger.warning(f'未找到序列: {pub_arg}_{cg_arg}。部分可用序列ID: {", ".join(available_ids)}...')
 
         results.update({
             'train_metrics': train_result['metrics'],
