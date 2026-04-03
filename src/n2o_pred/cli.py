@@ -10,6 +10,7 @@ from .compare import compare_experiments
 from .experiment import ExperimentRunner
 from .predict import predict_tif_data, predict_with_model
 from .preprocessing import preprocess_data
+from .regenerate_predictions import regenerate_predictions_for_split
 from .trainer import RFTrainConfig, RNNTrainConfig
 from .utils import create_logger, load_json
 
@@ -183,6 +184,29 @@ def cmd_predict(args):
             )
 
 
+def cmd_regenerate_predictions(args):
+    """重新生成预测表格命令"""
+    split_dir = Path(args.model)
+    if not split_dir.exists():
+        logger.error(f"模型目录不存在: {split_dir}")
+        sys.exit(1)
+
+    dataset_path = Path(args.dataset) if args.dataset else None
+    if dataset_path is not None and not dataset_path.exists():
+        logger.error(f"数据集路径不存在: {dataset_path}")
+        sys.exit(1)
+
+    logger.info(f"重新生成预测表格: {split_dir}")
+
+    regenerate_predictions_for_split(
+        split_dir=split_dir,
+        dataset_path=dataset_path,
+        device=args.device,
+    )
+
+    logger.info("预测表格重新生成完成！")
+
+
 def main() -> None:
     """主函数"""
     parser = argparse.ArgumentParser(
@@ -192,16 +216,16 @@ def main() -> None:
 示例:
   # 数据预处理
   n2o-pred data --preprocessing
-  
+
   # 训练随机森林模型
   n2o-pred train --model rf --seed 42
-  
+
   # 训练RNN模型（观测步长）
   n2o-pred train --model rnn-obs --max-split 20
-  
+
   # 训练RNN模型（每日步长）
   n2o-pred train --model rnn-daily --seed-from outputs/exp_xxx/summary.json
-  
+
   # 比较模型
   n2o-pred compare --models outputs/exp_1 outputs/exp_2 outputs/exp_3
 
@@ -210,6 +234,9 @@ def main() -> None:
 
   # 预测（TIF格式数据）
   n2o-pred predict --model outputs/exp_xxx/split_42 --dataset input_2020 --output predictions/
+
+  # 重新生成预测表格（带定位列）
+  n2o-pred regenerate-predictions --model outputs/exp_xxx/split_42
         """,
     )
 
@@ -297,6 +324,21 @@ def main() -> None:
         "--batch-size", type=int, default=256, help="批次大小（TIF预测用，默认256）"
     )
     parser_predict.set_defaults(func=cmd_predict)
+
+    # ===== regenerate-predictions 命令 =====
+    parser_regen = subparsers.add_parser(
+        "regenerate-predictions", help="重新生成预测表格（包含定位列）"
+    )
+    parser_regen.add_argument(
+        "--model", type=str, required=True, help="模型split目录（如 outputs/exp_xxx/split_42）"
+    )
+    parser_regen.add_argument(
+        "--dataset", type=str, help="可选的数据集路径（默认使用 datasets/data_EUR_processed.pkl）"
+    )
+    parser_regen.add_argument(
+        "--device", type=str, default="cpu", help="设备（默认cpu）"
+    )
+    parser_regen.set_defaults(func=cmd_regenerate_predictions)
 
     # 解析参数
     args = parser.parse_args()
