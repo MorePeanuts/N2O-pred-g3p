@@ -138,6 +138,18 @@ def cmd_predict(args):
         logger.error(f'数据路径不存在: {data_path}')
         sys.exit(1)
 
+    # 解析plot参数
+    plot_sequences = None
+    if args.plot:
+        plot_sequences = []
+        for plot_arg in args.plot:
+            parts = plot_arg.split(',')
+            if len(parts) != 2:
+                logger.error(f'无效的序列格式: {plot_arg}，应为 "publication,control_group"')
+                sys.exit(1)
+            plot_sequences.append((parts[0], parts[1]))
+        logger.info(f'将绘制 {len(plot_sequences)} 个序列的预测图')
+
     # 检查是否为TIF目录（包含TIF文件的目录）
     is_tif_dir = data_path.is_dir() and any(data_path.glob('*.tif'))
 
@@ -170,6 +182,7 @@ def cmd_predict(args):
             data_path=data_path,
             output_path=output_path,
             device=args.device,
+            plot_sequences=plot_sequences,
         )
 
         logger.info('预测完成！')
@@ -199,6 +212,9 @@ def main() -> None:
 
   # 预测（常规数据）
   n2o-pred predict --model outputs/exp_xxx/split_42 --dataset datasets/data_EUR_processed.pkl
+
+  # 预测并绘制特定序列的预测图
+  n2o-pred predict --model outputs/exp_xxx/split_42 --dataset datasets/data_EUR_processed.pkl --plot 44,3 58,3
 
   # 预测（TIF格式数据）
   n2o-pred predict --model outputs/exp_xxx/split_42 --dataset input_2020 --output predictions/
@@ -271,6 +287,12 @@ def main() -> None:
     parser_predict.add_argument('--device', type=str, default='cuda:0', help='设备（默认cuda:0）')
     parser_predict.add_argument(
         '--batch-size', type=int, default=256, help='批次大小（TIF预测用，默认256）'
+    )
+    parser_predict.add_argument(
+        '--plot',
+        type=str,
+        nargs='*',
+        help='需要绘制预测图的序列，格式为 "publication,control_group"，例如 --plot 44,3 58,3',
     )
     parser_predict.set_defaults(func=cmd_predict)
 

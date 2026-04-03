@@ -393,6 +393,7 @@ def predict_with_model(
     data_path: Path | str,
     output_path: Path | str | None = None,
     device: str = 'cpu',
+    plot_sequences: list[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """
     使用训练好的模型进行在对应的数据集划分上进行预测的便捷函数
@@ -402,6 +403,7 @@ def predict_with_model(
         data_path: 数据路径
         output_path: 输出路径（保存带预测结果的数据，包括feature_importance.csv, test_predictions.csv, train_predictions.csv, val_predictions.csv）
         device: 设备
+        plot_sequences: 需要绘制预测图的序列ID列表，每个元素是(publication, control_group)元组
 
     Returns:
         预测结果
@@ -478,6 +480,11 @@ def predict_with_model(
     tables_dir = output_path / 'tables'
     tables_dir.mkdir(parents=True, exist_ok=True)
 
+    figs_dir = None
+    if plot_sequences:
+        figs_dir = output_path / 'figs'
+        figs_dir.mkdir(parents=True, exist_ok=True)
+
     results = {
         'model_type': model_type,
         'seed': seed,
@@ -538,6 +545,53 @@ def predict_with_model(
                 'importance': list(feature_importances.values()),
             }).sort_values('importance', ascending=False)
             importance_df.to_csv(tables_dir / 'feature_importance.csv', index=False)
+
+        # 绘制序列预测图
+        if plot_sequences and figs_dir is not None:
+            from .evaluation import plot_sequence_predictions
+
+            # 合并所有数据进行查找
+            all_bases = [('train', train_base, train_result), ('val', val_base, val_result), ('test', test_base, test_result)]
+
+            for seq_id_tuple in plot_sequences:
+                pub, cg = seq_id_tuple
+                found = False
+
+                for split_name, base, result in all_bases:
+                    # 在该数据集中查找序列
+                    for seq_idx, seq in enumerate(base.sequences):
+                        if seq['seq_id'][0] == pub and seq['seq_id'][1] == cg:
+                            # 找到序列，现在需要获取预测值
+                            time_steps = np.array(seq['sowdurs'])
+                            targets = np.array(seq['targets'])
+
+                            # 从data_with_predictions中获取预测值
+                            data_with_preds = result['data_with_predictions']
+                            pred_seq = None
+                            for s in data_with_preds.sequences:
+                                if s['seq_id'][0] == pub and s['seq_id'][1] == cg:
+                                    pred_seq = s
+                                    break
+
+                            if pred_seq is not None and 'predicted_targets' in pred_seq:
+                                predictions = np.array(pred_seq['predicted_targets'])
+
+                                plot_sequence_predictions(
+                                    seq_id_tuple,
+                                    time_steps,
+                                    targets,
+                                    predictions,
+                                    figs_dir / f'sequence_predictions_{pub}_{cg}.png',
+                                    mask=None,
+                                )
+                                logger.info(f'已绘制序列预测图: {pub}_{cg} ({split_name}集)')
+                                found = True
+                                break
+                    if found:
+                        break
+
+                if not found:
+                    logger.warning(f'未找到序列: {pub}_{cg}')
 
         results.update({
             'train_metrics': train_result['metrics'],
@@ -652,6 +706,55 @@ def predict_with_model(
             tables_dir / 'test_predictions.csv',
             additional_cols=test_loc_cols,
         )
+
+        # 绘制序列预测图
+        if plot_sequences and figs_dir is not None:
+            from .evaluation import plot_sequence_predictions
+
+            # 合并所有数据进行查找
+            all_bases = [
+                ('train', train_base, train_dataset, train_result),
+                ('val', val_base, val_dataset, val_result),
+                ('test', test_base, test_dataset, test_result),
+            ]
+
+            for seq_id_tuple in plot_sequences:
+                pub, cg = seq_id_tuple
+                found = False
+
+                for split_name, base, dataset, result in all_bases:
+                    # 在该数据集中查找序列
+                    for seq_idx, seq in enumerate(base.sequences):
+                        if seq['seq_id'][0] == pub and seq['seq_id'][1] == cg:
+                            # 找到序列，从data_with_predictions中获取预测值
+                            data_with_preds = result['data_with_predictions']
+                            pred_seq = None
+                            for s in data_with_preds.sequences:
+                                if s['seq_id'][0] == pub and s['seq_id'][1] == cg:
+                                    pred_seq = s
+                                    break
+
+                            if pred_seq is not None and 'predicted_targets' in pred_seq:
+                                predictions = np.array(pred_seq['predicted_targets'])
+                                time_steps = np.array(seq['sowdurs'])
+                                targets = np.array(seq['targets'])
+
+                                plot_sequence_predictions(
+                                    seq_id_tuple,
+                                    time_steps,
+                                    targets,
+                                    predictions,
+                                    figs_dir / f'sequence_predictions_{pub}_{cg}.png',
+                                    mask=None,
+                                )
+                                logger.info(f'已绘制序列预测图: {pub}_{cg} ({split_name}集)')
+                                found = True
+                                break
+                    if found:
+                        break
+
+                if not found:
+                    logger.warning(f'未找到序列: {pub}_{cg}')
 
         results.update({
             'train_metrics': train_result['metrics'],
