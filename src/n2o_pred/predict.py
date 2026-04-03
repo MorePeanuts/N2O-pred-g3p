@@ -409,47 +409,49 @@ def predict_with_model(
     model_dir = Path(model_dir)
     data_path = Path(data_path)
 
-    # 1. 从模型目录名提取种子
-    if not model_dir.name.startswith('split_'):
-        raise ValueError(f'模型目录名必须以split_开头: {model_dir.name}')
-    seed = int(model_dir.name.split('_')[1])
-    logger.info(f'提取到数据分割种子: {seed}')
-
-    # 2. 确定输出路径
     if output_path is None:
         output_path = model_dir
     else:
         output_path = Path(output_path)
-    output_path.mkdir(parents=True, exist_ok=True)
-    tables_dir = output_path / 'tables'
-    tables_dir.mkdir(exist_ok=True)
+        output_path.mkdir(parents=True, exist_ok=True)
 
-    # 3. 加载预测器
-    predictor = N2OPredictor(model_dir)
-    model_type = predictor.model_type
+    # 从目录名中提取seed
+    split_dir_name = model_dir.name
+    if not split_dir_name.startswith('split_'):
+        raise ValueError(f'模型目录名必须以split_开头，当前: {split_dir_name}')
+    seed = int(split_dir_name.split('_')[1])
+    logger.info(f'从模型目录提取seed: {seed}')
+
+    # 从summary.json获取模型类型
+    summary_path = model_dir.parent / 'summary.json'
+    if summary_path.exists():
+        summary = load_json(summary_path)
+        model_type = summary['model_type']
+    else:
+        # 尝试从配置推断
+        config_path = model_dir / 'config.json'
+        config = load_json(config_path)
+        if 'rnn_type' in config:
+            logger.warning('无法从summary.json确定模型类型，默认使用rnn-obs')
+            model_type = 'rnn-obs'
+        else:
+            model_type = 'rf'
+
     logger.info(f'模型类型: {model_type}')
 
-    # 4. 加载数据并进行与训练时相同的划分
-    from sklearn.model_selection import train_test_split as sklearn_split
-    from .dataset import (
-        BaseN2ODataset,
-        N2ODatasetForDailyStepRNN,
-        N2ODatasetForObsStepRNN,
-    )
-
+    # 加载数据
     logger.info(f'从 {data_path} 加载数据...')
-    if data_path.suffix == '.pkl':
-        with open(data_path, 'rb') as f:
-            base_dataset = pickle.load(f)
-    else:
-        # 尝试从默认路径加载
-        base_dataset = BaseN2ODataset()
+    with open(data_path, 'rb') as f:
+        sequences = pickle.load(f)
+    base_dataset = BaseN2ODataset(sequences=sequences)
 
-    # 进行数据划分（与训练时相同的逻辑）
+    # 使用相同的seed进行数据划分
+    from sklearn.model_selection import train_test_split as sklearn_split
+
     n_sequences = len(base_dataset)
     indices = list(range(n_sequences))
 
-    train_split = 0.8  # 默认训练集比例
+    train_split = 0.9  # 默认值，与训练时保持一致
     test_ratio = (1.0 - train_split) / 2
     train_val_indices, test_indices = sklearn_split(
         indices, train_size=1.0 - test_ratio, random_state=seed
@@ -460,14 +462,26 @@ def predict_with_model(
         train_val_indices, train_size=1.0 - val_ratio, random_state=seed
     )
 
-    logger.info(f'数据集划分: {len(train_indices)} 训练, {len(val_indices)} 验证, {len(test_indices)} 测试')
+    logger.info(
+        f'数据集划分: {len(train_indices)} 训练, '
+        f'{len(val_indices)} 验证, {len(test_indices)} 测试'
+    )
 
     train_base = base_dataset[train_indices]
     val_base = base_dataset[val_indices]
     test_base = base_dataset[test_indices]
 
-    # 5. 根据模型类型进行预测
-    results = {}
+    # 加载预测器
+    predictor = N2OPredictor(model_dir)
+
+    # 创建输出目录
+    tables_dir = output_path / 'tables'
+    tables_dir.mkdir(parents=True, exist_ok=True)
+
+    results = {
+        'model_type': model_type,
+        'seed': seed,
+    }
 
     if model_type == 'rf':
         # 随机森林预测
@@ -516,44 +530,46 @@ def predict_with_model(
             },
         )
 
-        # 保存特征重要性
-        feature_importances = predictor.model.get_feature_importances()
-        importance_df = pd.DataFrame({
-            'feature': list(feature_importances.keys()),
-            'importance': list(feature_importances.values()),
-        }).sort_values('importance', ascending=False)
-        importance_df.to_csv(tables_dir / 'feature_importance.csv', index=False)
+        # 保存特征重要性（如果有）
+        if hasattr(predictor.model, 'get_feature_importances'):
+            feature_importances = predictor.model.get_feature_importances()
+            importance_df = pd.DataFrame({
+                'feature': list(feature_importances.keys()),
+                'importance': list(feature_importances.values()),
+            }).sort_values('importance', ascending=False)
+            importance_df.to_csv(tables_dir / 'feature_importance.csv', index=False)
 
-        results = {
-            'train': train_result,
-            'val': val_result,
-            'test': test_result,
-            'feature_importances': feature_importances,
-        }
+        results.update({
+            'train_metrics': train_result['metrics'],
+            'val_metrics': val_result['metrics'],
+            'test_metrics': test_result['metrics'],
+        })
 
     else:
         # RNN模型预测
-        from .evaluation import save_predictions_to_csv
+        from .dataset import N2ODatasetForObsStepRNN, N2ODatasetForDailyStepRNN, collate_fn
+        from torch.utils.data import DataLoader
 
-        # 创建数据集
+        use_mask = model_type == 'rnn-daily'
+
+        # 准备数据集
         if model_type == 'rnn-obs':
             train_dataset = N2ODatasetForObsStepRNN(train_base, fit_scalers=False, scalers=predictor.scalers)
             val_dataset = N2ODatasetForObsStepRNN(val_base, fit_scalers=False, scalers=predictor.scalers)
             test_dataset = N2ODatasetForObsStepRNN(test_base, fit_scalers=False, scalers=predictor.scalers)
-            use_mask = False
-        else:  # rnn-daily
+        else:
             train_dataset = N2ODatasetForDailyStepRNN(train_base, fit_scalers=False, scalers=predictor.scalers)
             val_dataset = N2ODatasetForDailyStepRNN(val_base, fit_scalers=False, scalers=predictor.scalers)
             test_dataset = N2ODatasetForDailyStepRNN(test_base, fit_scalers=False, scalers=predictor.scalers)
-            use_mask = True
 
-        # 预测
+        # 预测并获取完整结果
         train_result = predictor.predict(train_base, device=device)
         val_result = predictor.predict(val_base, device=device)
         test_result = predictor.predict(test_base, device=device)
 
-        # 获取定位列
-        def _get_location_cols(base_data, rnn_dataset=None, use_mask=False):
+        # 获取定位列信息
+        def _get_location_cols_from_base(base_data, rnn_dataset=None, use_mask=False):
+            """从基础数据集中获取定位列信息"""
             if not use_mask:
                 df = base_data.flatten_to_dataframe()
                 return {
@@ -602,58 +618,48 @@ def predict_with_model(
                     'sowdur': np.array(sowdur_list),
                 }
 
-        train_loc_cols = _get_location_cols(train_base, train_dataset if use_mask else None, use_mask=use_mask)
-        val_loc_cols = _get_location_cols(val_base, val_dataset if use_mask else None, use_mask=use_mask)
-        test_loc_cols = _get_location_cols(test_base, test_dataset if use_mask else None, use_mask=use_mask)
+        train_loc_cols = _get_location_cols_from_base(train_base, train_dataset if use_mask else None, use_mask=use_mask)
+        val_loc_cols = _get_location_cols_from_base(val_base, val_dataset if use_mask else None, use_mask=use_mask)
+        test_loc_cols = _get_location_cols_from_base(test_base, test_dataset if use_mask else None, use_mask=use_mask)
 
-        # 使用合适的targets
-        def get_targets_for_save(result):
-            if 'targets_masked' in result and result['targets_masked'] is not None:
-                return result['targets_masked']
-            return result['targets']
+        from .evaluation import save_predictions_to_csv
+
+        # 确定使用的预测和目标值
+        def get_predictions_and_targets(result):
+            if use_mask and 'targets_masked' in result:
+                return result['predictions'][result['masks']] if 'masks' in result else result['predictions'], result['targets_masked']
+            return result['predictions'], result['targets']
+
+        train_preds, train_targets = get_predictions_and_targets(train_result)
+        val_preds, val_targets = get_predictions_and_targets(val_result)
+        test_preds, test_targets = get_predictions_and_targets(test_result)
 
         save_predictions_to_csv(
-            train_result['predictions'] if not use_mask else train_result['predictions'][train_result['masks']],
-            get_targets_for_save(train_result),
+            train_preds,
+            train_targets,
             tables_dir / 'train_predictions.csv',
             additional_cols=train_loc_cols,
         )
         save_predictions_to_csv(
-            val_result['predictions'] if not use_mask else val_result['predictions'][val_result['masks']],
-            get_targets_for_save(val_result),
+            val_preds,
+            val_targets,
             tables_dir / 'val_predictions.csv',
             additional_cols=val_loc_cols,
         )
         save_predictions_to_csv(
-            test_result['predictions'] if not use_mask else test_result['predictions'][test_result['masks']],
-            get_targets_for_save(test_result),
+            test_preds,
+            test_targets,
             tables_dir / 'test_predictions.csv',
             additional_cols=test_loc_cols,
         )
 
-        # 尝试计算并保存SHAP特征重要性
-        try:
-            from .evaluation import compute_shap_values, plot_feature_importance
-            logger.info('计算特征重要性（使用SHAP）...')
-            shap_values, feature_names = compute_shap_values(
-                predictor.model, test_dataset, model_type, device, max_samples=100
-            )
-            importance_df = pd.DataFrame({
-                'feature': feature_names,
-                'importance': shap_values,
-            }).sort_values('importance', ascending=False)
-            importance_df.to_csv(tables_dir / 'feature_importance.csv', index=False)
-            results['feature_importances'] = dict(zip(feature_names, shap_values))
-        except Exception as e:
-            logger.warning(f'SHAP分析失败: {e}')
+        results.update({
+            'train_metrics': train_result['metrics'],
+            'val_metrics': val_result['metrics'],
+            'test_metrics': test_result['metrics'],
+        })
 
-        results = {
-            'train': train_result,
-            'val': val_result,
-            'test': test_result,
-        }
-
-    logger.info(f'预测结果已保存到 {tables_dir}')
+    logger.info(f'预测完成，结果已保存到 {tables_dir}')
     return results
 
 
