@@ -491,14 +491,15 @@ def predict_with_model(
     }
 
     if model_type == 'rf':
-        # 随机森林预测
+        # 随机森林预测 - 传入BaseN2ODataset而不是DataFrame，这样返回的data_with_predictions会有sequences属性
+        train_result = predictor.predict(train_base, device=device)
+        val_result = predictor.predict(val_base, device=device)
+        test_result = predictor.predict(test_base, device=device)
+
+        # 仍然需要DataFrame用于保存CSV
         train_df = train_base.flatten_to_dataframe_for_rf()
         val_df = val_base.flatten_to_dataframe_for_rf()
         test_df = test_base.flatten_to_dataframe_for_rf()
-
-        train_result = predictor.predict(train_df, device=device)
-        val_result = predictor.predict(val_df, device=device)
-        test_result = predictor.predict(test_df, device=device)
 
         # 保存预测结果
         from .evaluation import save_predictions_to_csv
