@@ -291,8 +291,14 @@ def train_rnn_predictor(
 
     logger.info(f"训练完成，最佳epoch: {best_epoch + 1}")
 
-    # 在训练集、验证集和测试集上评估
+    # 在训练集、验证集和测试集上评估（使用 shuffle=False 确保顺序一致）
+    from torch.utils.data import DataLoader
     model.eval()
+
+    # 创建 shuffle=False 的 DataLoader 用于评估，确保顺序与原始数据一致
+    eval_train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=False, collate_fn=train_loader.collate_fn)
+    eval_val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, collate_fn=val_loader.collate_fn)
+    eval_test_loader = DataLoader(test_dataset, batch_size=config.batch_size, shuffle=False, collate_fn=test_loader.collate_fn)
 
     train_preds_list = []
     train_targets_list = []
@@ -303,7 +309,7 @@ def train_rnn_predictor(
 
     with torch.no_grad():
         # 训练集
-        for batch in train_loader:
+        for batch in eval_train_loader:
             static_numeric = batch["static_numeric"].to(device)
             dynamic_numeric = batch["dynamic_numeric"].to(device)
             static_categorical = batch["static_categorical"].to(device)
@@ -339,7 +345,7 @@ def train_rnn_predictor(
                     train_targets_list.extend(target_orig)
 
         # 验证集
-        for batch in val_loader:
+        for batch in eval_val_loader:
             static_numeric = batch["static_numeric"].to(device)
             dynamic_numeric = batch["dynamic_numeric"].to(device)
             static_categorical = batch["static_categorical"].to(device)
@@ -373,7 +379,7 @@ def train_rnn_predictor(
                     val_targets_list.extend(target_orig)
 
         # 测试集
-        for batch in test_loader:
+        for batch in eval_test_loader:
             static_numeric = batch["static_numeric"].to(device)
             dynamic_numeric = batch["dynamic_numeric"].to(device)
             static_categorical = batch["static_categorical"].to(device)
@@ -465,7 +471,7 @@ class RFTrainConfig:
             "n_estimators": self.n_estimators,
             "max_depth": self.max_depth,
             "min_samples_split": self.min_samples_split,
-            "min_samples_leaf": self.min_samples_leaf,
+            "min_samples_leaf": self.min_samples_split,
             "max_features": self.max_features,
             "random_state": self.random_state,
             "n_jobs": self.n_jobs,

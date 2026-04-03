@@ -46,6 +46,73 @@ from .utils import create_logger, get_device, load_json, save_json, set_seed
 logger = create_logger(__name__)
 
 
+def _get_location_cols_from_base(base_data, rnn_dataset=None, use_mask=False):
+    """
+    从基础数据集中获取定位列信息
+
+    Args:
+        base_data: BaseN2ODataset 实例
+        rnn_dataset: RNN数据集实例（用于rnn-daily模型）
+        use_mask: 是否使用掩码（rnn-daily模型为True）
+
+    Returns:
+        dict: 包含定位列的字典
+    """
+    if not use_mask:
+        # 对于rnn-obs模型，直接使用所有数据
+        df = base_data.flatten_to_dataframe()
+        return {
+            "No. of obs": df["No. of obs"].values,
+            "Publication": df["Publication"].values,
+            "control_group": df["control_group"].values,
+            "sowdur": df["sowdur"].values,
+        }
+    else:
+        # 对于rnn-daily模型，只收集真实测量点
+        no_of_obs_list = []
+        publication_list = []
+        control_group_list = []
+        sowdur_list = []
+
+        for seq_idx, seq in enumerate(base_data.sequences):
+            seq_id = seq["seq_id"]
+            no_of_obs = seq["No. of obs"]
+            sowdurs = seq["sowdurs"]
+
+            if rnn_dataset is not None:
+                # 获取该序列的掩码
+                daily_seq = rnn_dataset.daily_sequences[seq_idx]
+                mask = daily_seq["mask"]
+                start_day = daily_seq["start_day"]
+
+                # 创建从 sowdur 到原始索引的映射
+                sowdur_to_orig_idx = {int(sowdurs[i]): i for i in range(len(sowdurs))}
+
+                # 只收集掩码为True的点
+                for day_idx in range(len(mask)):
+                    if mask[day_idx]:
+                        day = start_day + day_idx
+                        if day in sowdur_to_orig_idx:
+                            orig_idx = sowdur_to_orig_idx[day]
+                            no_of_obs_list.append(no_of_obs[orig_idx])
+                            publication_list.append(seq_id[0])
+                            control_group_list.append(seq_id[1])
+                            sowdur_list.append(day)
+            else:
+                # 如果没有rnn_dataset，使用所有点
+                no_of_obs_list.extend(no_of_obs)
+                publication_list.extend([seq_id[0]] * len(no_of_obs))
+                control_group_list.extend([seq_id[1]] * len(no_of_obs))
+                sowdur_list.extend(sowdurs)
+
+        return {
+            "No. of obs": np.array(no_of_obs_list),
+            "Publication": np.array(publication_list),
+            "control_group": np.array(control_group_list),
+            "sowdur": np.array(sowdur_list),
+        }
+
+
 def _parallel_train_worker(args_tuple):
     """
     Worker function for parallel split training
@@ -188,16 +255,34 @@ def _train_rf_worker(train_base, val_base, test_base, config, save_dir, logger):
         train_result["train_predictions"],
         train_result["train_targets"],
         tables_dir / "train_predictions.csv",
+        additional_cols={
+            "No. of obs": train_df["No. of obs"].values,
+            "Publication": train_df["Publication"].values,
+            "control_group": train_df["control_group"].values,
+            "sowdur": train_df["sowdur"].values,
+        },
     )
     save_predictions_to_csv(
         train_result["val_predictions"],
         train_result["val_targets"],
         tables_dir / "val_predictions.csv",
+        additional_cols={
+            "No. of obs": val_df["No. of obs"].values,
+            "Publication": val_df["Publication"].values,
+            "control_group": val_df["control_group"].values,
+            "sowdur": val_df["sowdur"].values,
+        },
     )
     save_predictions_to_csv(
         train_result["test_predictions"],
         train_result["test_targets"],
         tables_dir / "test_predictions.csv",
+        additional_cols={
+            "No. of obs": test_df["No. of obs"].values,
+            "Publication": test_df["Publication"].values,
+            "control_group": test_df["control_group"].values,
+            "sowdur": test_df["sowdur"].values,
+        },
     )
 
     # 4. 保存特征重要性到CSV
@@ -349,20 +434,26 @@ def _train_rnn_obs_worker(train_base, val_base, test_base, config, save_dir, dev
     )
 
     # 3. 保存预测结果到CSV
+    train_loc_cols = _get_location_cols_from_base(train_base, use_mask=False)
+    val_loc_cols = _get_location_cols_from_base(val_base, use_mask=False)
+    test_loc_cols = _get_location_cols_from_base(test_base, use_mask=False)
     save_predictions_to_csv(
         train_result["train_predictions"],
         train_result["train_targets"],
         tables_dir / "train_predictions.csv",
+        additional_cols=train_loc_cols,
     )
     save_predictions_to_csv(
         train_result["val_predictions"],
         train_result["val_targets"],
         tables_dir / "val_predictions.csv",
+        additional_cols=val_loc_cols,
     )
     save_predictions_to_csv(
         train_result["test_predictions"],
         train_result["test_targets"],
         tables_dir / "test_predictions.csv",
+        additional_cols=test_loc_cols,
     )
 
     # 4. SHAP分析
@@ -543,20 +634,26 @@ def _train_rnn_daily_worker(train_base, val_base, test_base, config, save_dir, d
     )
 
     # 3. 保存预测结果到CSV
+    train_loc_cols = _get_location_cols_from_base(train_base, train_dataset, use_mask=True)
+    val_loc_cols = _get_location_cols_from_base(val_base, val_dataset, use_mask=True)
+    test_loc_cols = _get_location_cols_from_base(test_base, test_dataset, use_mask=True)
     save_predictions_to_csv(
         train_result["train_predictions"],
         train_result["train_targets"],
         tables_dir / "train_predictions.csv",
+        additional_cols=train_loc_cols,
     )
     save_predictions_to_csv(
         train_result["val_predictions"],
         train_result["val_targets"],
         tables_dir / "val_predictions.csv",
+        additional_cols=val_loc_cols,
     )
     save_predictions_to_csv(
         train_result["test_predictions"],
         train_result["test_targets"],
         tables_dir / "test_predictions.csv",
+        additional_cols=test_loc_cols,
     )
 
     # 4. SHAP分析
@@ -1045,6 +1142,9 @@ class ExperimentRunner:
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             test_dataset=test_dataset,
+            train_base=train_base,
+            val_base=val_base,
+            test_base=test_base,
             save_dir=save_dir,
             use_mask=False,
         )
@@ -1162,6 +1262,9 @@ class ExperimentRunner:
             train_dataset=train_dataset,
             val_dataset=val_dataset,
             test_dataset=test_dataset,
+            train_base=train_base,
+            val_base=val_base,
+            test_base=test_base,
             save_dir=save_dir,
             use_mask=True,
         )
@@ -1218,16 +1321,34 @@ class ExperimentRunner:
             train_result["train_predictions"],
             train_result["train_targets"],
             tables_dir / "train_predictions.csv",
+            additional_cols={
+                "No. of obs": train_df["No. of obs"].values,
+                "Publication": train_df["Publication"].values,
+                "control_group": train_df["control_group"].values,
+                "sowdur": train_df["sowdur"].values,
+            },
         )
         save_predictions_to_csv(
             train_result["val_predictions"],
             train_result["val_targets"],
             tables_dir / "val_predictions.csv",
+            additional_cols={
+                "No. of obs": val_df["No. of obs"].values,
+                "Publication": val_df["Publication"].values,
+                "control_group": val_df["control_group"].values,
+                "sowdur": val_df["sowdur"].values,
+            },
         )
         save_predictions_to_csv(
             train_result["test_predictions"],
             train_result["test_targets"],
             tables_dir / "test_predictions.csv",
+            additional_cols={
+                "No. of obs": test_df["No. of obs"].values,
+                "Publication": test_df["Publication"].values,
+                "control_group": test_df["control_group"].values,
+                "sowdur": test_df["sowdur"].values,
+            },
         )
 
         # 4. 保存特征重要性到CSV
@@ -1297,6 +1418,9 @@ class ExperimentRunner:
         train_dataset: Any,
         val_dataset: Any,
         test_dataset: Any,
+        train_base: BaseN2ODataset,
+        val_base: BaseN2ODataset,
+        test_base: BaseN2ODataset,
         save_dir: Path,
         use_mask: bool,
     ):
@@ -1323,20 +1447,26 @@ class ExperimentRunner:
         )
 
         # 3. 保存预测结果到CSV
+        train_loc_cols = _get_location_cols_from_base(train_base, train_dataset if use_mask else None, use_mask=use_mask)
+        val_loc_cols = _get_location_cols_from_base(val_base, val_dataset if use_mask else None, use_mask=use_mask)
+        test_loc_cols = _get_location_cols_from_base(test_base, test_dataset if use_mask else None, use_mask=use_mask)
         save_predictions_to_csv(
             train_result["train_predictions"],
             train_result["train_targets"],
             tables_dir / "train_predictions.csv",
+            additional_cols=train_loc_cols,
         )
         save_predictions_to_csv(
             train_result["val_predictions"],
             train_result["val_targets"],
             tables_dir / "val_predictions.csv",
+            additional_cols=val_loc_cols,
         )
         save_predictions_to_csv(
             train_result["test_predictions"],
             train_result["test_targets"],
             tables_dir / "test_predictions.csv",
+            additional_cols=test_loc_cols,
         )
 
         # 4. SHAP分析（简化版，使用梯度近似）
