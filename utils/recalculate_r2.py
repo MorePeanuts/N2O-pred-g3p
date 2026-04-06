@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-递归遍历模型训练输出文件夹，根据 tables 中的 CSV 重新计算 R2 并更新 metrics.json
+Recursively traverse model training output folders, recalculate R2 from CSV tables and update metrics.json
 """
 
 import argparse
@@ -14,7 +14,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
     """
-    计算回归评估指标（与 evaluation.py 保持一致）
+    Compute regression evaluation metrics (consistent with evaluation.py)
     """
     r2 = r2_score(y_true, y_pred)
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
@@ -33,23 +33,23 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
 
 def update_metrics_for_split(split_dir: Path) -> bool:
     """
-    为单个 split_xxx 文件夹重新计算 metrics 并更新 metrics.json
+    Recalculate metrics for a single split_xxx folder and update metrics.json
 
     Returns:
-        bool: 是否成功更新
+        bool: Whether successfully updated
     """
     metrics_path = split_dir / "metrics.json"
     tables_dir = split_dir / "tables"
 
     if not metrics_path.exists():
-        print(f"  跳过: 找不到 metrics.json: {metrics_path}")
+        print(f"  Skipping: metrics.json not found: {metrics_path}")
         return False
 
     if not tables_dir.exists():
-        print(f"  跳过: 找不到 tables 目录: {tables_dir}")
+        print(f"  Skipping: tables directory not found: {tables_dir}")
         return False
 
-    # 读取原始 metrics
+    # Read original metrics
     with open(metrics_path, "r", encoding="utf-8") as f:
         metrics = json.load(f)
 
@@ -61,59 +61,59 @@ def update_metrics_for_split(split_dir: Path) -> bool:
         metrics_key = f"{split}_metrics"
 
         if not csv_path.exists():
-            print(f"  警告: 找不到 {csv_path}")
+            print(f"  Warning: {csv_path} not found")
             continue
 
         if metrics_key not in metrics:
-            print(f"  警告: metrics.json 中缺少 {metrics_key}")
+            print(f"  Warning: {metrics_key} missing in metrics.json")
             continue
 
-        # 读取 CSV
+        # Read CSV
         df = pd.read_csv(csv_path)
 
         if "actual" not in df.columns or "predicted" not in df.columns:
-            print(f"  警告: {csv_path} 缺少 actual 或 predicted 列")
+            print(f"  Warning: {csv_path} missing actual or predicted column")
             continue
 
-        # 删除 NaN 值
+        # Drop NaN values
         valid_mask = df["actual"].notna() & df["predicted"].notna()
         if not valid_mask.all():
-            print(f"  提示: {csv_path} 中有 {len(df) - valid_mask.sum()} 行 NaN 值已忽略")
+            print(f"  Info: {len(df) - valid_mask.sum()} NaN rows ignored in {csv_path}")
 
         y_true = df.loc[valid_mask, "actual"].values
         y_pred = df.loc[valid_mask, "predicted"].values
 
         if len(y_true) < 2:
-            print(f"  警告: {csv_path} 有效样本数不足，跳过")
+            print(f"  Warning: Not enough valid samples in {csv_path}, skipping")
             continue
 
-        # 重新计算指标
+        # Recalculate metrics
         new_metrics = compute_metrics(y_true, y_pred)
         old_metrics = metrics[metrics_key]
 
-        # 比较差异
+        # Compare differences
         r2_diff = abs(new_metrics["R2"] - old_metrics["R2"])
         if r2_diff > 1e-8:
             print(f"  {split}: R2 {old_metrics['R2']:.6f} -> {new_metrics['R2']:.6f} (diff: {r2_diff:.6f})")
             metrics[metrics_key] = new_metrics
             updated = True
         else:
-            print(f"  {split}: R2 无变化 ({old_metrics['R2']:.6f})")
+            print(f"  {split}: R2 unchanged ({old_metrics['R2']:.6f})")
 
-    # 保存更新后的 metrics
+    # Save updated metrics
     if updated:
         with open(metrics_path, "w", encoding="utf-8") as f:
             json.dump(metrics, f, indent=2, ensure_ascii=False)
-        print(f"  ✓ 已更新: {metrics_path}")
+        print(f"  ✓ Updated: {metrics_path}")
     else:
-        print(f"  - 无需更新: {metrics_path}")
+        print(f"  - No update needed: {metrics_path}")
 
     return updated
 
 
 def find_split_dirs(root_path: Path) -> list[Path]:
     """
-    递归查找所有 split_xxx 文件夹
+    Recursively find all split_xxx folders
     """
     split_dirs = []
     for path in root_path.rglob("split_*"):
@@ -124,41 +124,41 @@ def find_split_dirs(root_path: Path) -> list[Path]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="递归遍历模型训练输出文件夹，根据 tables 中的 CSV 重新计算 R2 并更新 metrics.json"
+        description="Recursively traverse model training output folders, recalculate R2 from CSV tables and update metrics.json"
     )
     parser.add_argument(
         "path",
         type=Path,
-        help="要扫描的根路径（可以是 outputs/ 或单个 exp_xxx 文件夹）"
+        help="Root path to scan (can be outputs/ or a single exp_xxx folder)"
     )
     args = parser.parse_args()
 
     root_path = args.path
 
     if not root_path.exists():
-        print(f"错误: 路径不存在: {root_path}")
+        print(f"Error: Path does not exist: {root_path}")
         return 1
 
-    print(f"扫描路径: {root_path}")
+    print(f"Scanning path: {root_path}")
 
-    # 查找所有 split_xxx 文件夹
+    # Find all split_xxx folders
     split_dirs = find_split_dirs(root_path)
 
     if not split_dirs:
-        print(f"未找到任何 split_xxx 文件夹")
+        print(f"No split_xxx folders found")
         return 0
 
-    print(f"找到 {len(split_dirs)} 个 split_xxx 文件夹\n")
+    print(f"Found {len(split_dirs)} split_xxx folders\n")
 
-    # 处理每个文件夹
+    # Process each folder
     updated_count = 0
     for i, split_dir in enumerate(split_dirs, 1):
-        print(f"[{i}/{len(split_dirs)}] 处理: {split_dir}")
+        print(f"[{i}/{len(split_dirs)}] Processing: {split_dir}")
         if update_metrics_for_split(split_dir):
             updated_count += 1
         print()
 
-    print(f"完成! 共更新 {updated_count}/{len(split_dirs)} 个文件夹")
+    print(f"Done! Updated {updated_count}/{len(split_dirs)} folders")
     return 0
 
 
