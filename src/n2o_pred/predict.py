@@ -453,7 +453,7 @@ def predict_with_model(
     n_sequences = len(base_dataset)
     indices = list(range(n_sequences))
 
-    train_split = 0.9  # 默认值，与训练时保持一致
+    train_split = 0.8  # 默认值，与训练时保持一致
     test_ratio = (1.0 - train_split) / 2
     train_val_indices, test_indices = sklearn_split(
         indices, train_size=1.0 - test_ratio, random_state=seed
@@ -465,8 +465,7 @@ def predict_with_model(
     )
 
     logger.info(
-        f'数据集划分: {len(train_indices)} 训练, '
-        f'{len(val_indices)} 验证, {len(test_indices)} 测试'
+        f'数据集划分: {len(train_indices)} 训练, {len(val_indices)} 验证, {len(test_indices)} 测试'
     )
 
     train_base = base_dataset[train_indices]
@@ -541,10 +540,12 @@ def predict_with_model(
         # 保存特征重要性（如果有）
         if hasattr(predictor.model, 'get_feature_importances'):
             feature_importances = predictor.model.get_feature_importances()
-            importance_df = pd.DataFrame({
-                'feature': list(feature_importances.keys()),
-                'importance': list(feature_importances.values()),
-            }).sort_values('importance', ascending=False)
+            importance_df = pd.DataFrame(
+                {
+                    'feature': list(feature_importances.keys()),
+                    'importance': list(feature_importances.values()),
+                }
+            ).sort_values('importance', ascending=False)
             importance_df.to_csv(tables_dir / 'feature_importance.csv', index=False)
 
         # 绘制序列预测图
@@ -552,13 +553,19 @@ def predict_with_model(
             from .evaluation import plot_sequence_predictions
 
             # 合并所有数据进行查找
-            all_bases = [('train', train_base, train_result), ('val', val_base, val_result), ('test', test_base, test_result)]
+            all_bases = [
+                ('train', train_base, train_result),
+                ('val', val_base, val_result),
+                ('test', test_base, test_result),
+            ]
 
             # 打印前几个序列ID帮助调试
             if len(train_base.sequences) > 0:
                 sample_seq = train_base.sequences[0]
                 sample_id = sample_seq['seq_id']
-                logger.debug(f'数据集中的序列ID示例: {sample_id}, 类型: ({type(sample_id[0]), type(sample_id[1])})')
+                logger.debug(
+                    f'数据集中的序列ID示例: {sample_id}, 类型: ({type(sample_id[0]), type(sample_id[1])})'
+                )
 
             for seq_id_tuple in plot_sequences:
                 pub_arg, cg_arg = seq_id_tuple
@@ -599,12 +606,15 @@ def predict_with_model(
                             for s in data_with_preds.sequences:
                                 s_pub, s_cg = s['seq_id']
                                 # 同样尝试类型转换
-                                if (s_pub == seq_pub and s_cg == seq_cg):
+                                if s_pub == seq_pub and s_cg == seq_cg:
                                     pred_seq = s
                                     break
                                 else:
                                     try:
-                                        if (type(s_pub)(seq_pub) == s_pub and type(s_cg)(seq_cg) == s_cg):
+                                        if (
+                                            type(s_pub)(seq_pub) == s_pub
+                                            and type(s_cg)(seq_cg) == s_cg
+                                        ):
                                             pred_seq = s
                                             break
                                     except (ValueError, TypeError):
@@ -622,10 +632,13 @@ def predict_with_model(
                                     time_steps,
                                     targets,
                                     predictions,
-                                    figs_dir / f'sequence_predictions_{filename_pub}_{filename_cg}.png',
+                                    figs_dir
+                                    / f'sequence_predictions_{filename_pub}_{filename_cg}.png',
                                     mask=None,
                                 )
-                                logger.info(f'已绘制序列预测图: {seq_pub}_{seq_cg} ({split_name}集)')
+                                logger.info(
+                                    f'已绘制序列预测图: {seq_pub}_{seq_cg} ({split_name}集)'
+                                )
                                 found = True
                                 break
                     if found:
@@ -636,14 +649,18 @@ def predict_with_model(
                     available_ids = []
                     for split_name, base, _ in all_bases:
                         for seq in base.sequences[:10]:  # 只显示前10个
-                            available_ids.append(f"{seq['seq_id']}")
-                    logger.warning(f'未找到序列: {pub_arg}_{cg_arg}。部分可用序列ID: {", ".join(available_ids)}...')
+                            available_ids.append(f'{seq["seq_id"]}')
+                    logger.warning(
+                        f'未找到序列: {pub_arg}_{cg_arg}。部分可用序列ID: {", ".join(available_ids)}...'
+                    )
 
-        results.update({
-            'train_metrics': train_result['metrics'],
-            'val_metrics': val_result['metrics'],
-            'test_metrics': test_result['metrics'],
-        })
+        results.update(
+            {
+                'train_metrics': train_result['metrics'],
+                'val_metrics': val_result['metrics'],
+                'test_metrics': test_result['metrics'],
+            }
+        )
 
     else:
         # RNN模型预测
@@ -654,13 +671,25 @@ def predict_with_model(
 
         # 准备数据集
         if model_type == 'rnn-obs':
-            train_dataset = N2ODatasetForObsStepRNN(train_base, fit_scalers=False, scalers=predictor.scalers)
-            val_dataset = N2ODatasetForObsStepRNN(val_base, fit_scalers=False, scalers=predictor.scalers)
-            test_dataset = N2ODatasetForObsStepRNN(test_base, fit_scalers=False, scalers=predictor.scalers)
+            train_dataset = N2ODatasetForObsStepRNN(
+                train_base, fit_scalers=False, scalers=predictor.scalers
+            )
+            val_dataset = N2ODatasetForObsStepRNN(
+                val_base, fit_scalers=False, scalers=predictor.scalers
+            )
+            test_dataset = N2ODatasetForObsStepRNN(
+                test_base, fit_scalers=False, scalers=predictor.scalers
+            )
         else:
-            train_dataset = N2ODatasetForDailyStepRNN(train_base, fit_scalers=False, scalers=predictor.scalers)
-            val_dataset = N2ODatasetForDailyStepRNN(val_base, fit_scalers=False, scalers=predictor.scalers)
-            test_dataset = N2ODatasetForDailyStepRNN(test_base, fit_scalers=False, scalers=predictor.scalers)
+            train_dataset = N2ODatasetForDailyStepRNN(
+                train_base, fit_scalers=False, scalers=predictor.scalers
+            )
+            val_dataset = N2ODatasetForDailyStepRNN(
+                val_base, fit_scalers=False, scalers=predictor.scalers
+            )
+            test_dataset = N2ODatasetForDailyStepRNN(
+                test_base, fit_scalers=False, scalers=predictor.scalers
+            )
 
         # 预测并获取完整结果
         train_result = predictor.predict(train_base, device=device)
@@ -718,16 +747,24 @@ def predict_with_model(
                     'sowdur': np.array(sowdur_list),
                 }
 
-        train_loc_cols = _get_location_cols_from_base(train_base, train_dataset if use_mask else None, use_mask=use_mask)
-        val_loc_cols = _get_location_cols_from_base(val_base, val_dataset if use_mask else None, use_mask=use_mask)
-        test_loc_cols = _get_location_cols_from_base(test_base, test_dataset if use_mask else None, use_mask=use_mask)
+        train_loc_cols = _get_location_cols_from_base(
+            train_base, train_dataset if use_mask else None, use_mask=use_mask
+        )
+        val_loc_cols = _get_location_cols_from_base(
+            val_base, val_dataset if use_mask else None, use_mask=use_mask
+        )
+        test_loc_cols = _get_location_cols_from_base(
+            test_base, test_dataset if use_mask else None, use_mask=use_mask
+        )
 
         from .evaluation import save_predictions_to_csv
 
         # 确定使用的预测和目标值
         def get_predictions_and_targets(result):
             if use_mask and 'targets_masked' in result:
-                return result['predictions'][result['masks']] if 'masks' in result else result['predictions'], result['targets_masked']
+                return result['predictions'][result['masks']] if 'masks' in result else result[
+                    'predictions'
+                ], result['targets_masked']
             return result['predictions'], result['targets']
 
         train_preds, train_targets = get_predictions_and_targets(train_result)
@@ -768,7 +805,9 @@ def predict_with_model(
             if len(train_base.sequences) > 0:
                 sample_seq = train_base.sequences[0]
                 sample_id = sample_seq['seq_id']
-                logger.debug(f'数据集中的序列ID示例: {sample_id}, 类型: ({type(sample_id[0]), type(sample_id[1])})')
+                logger.debug(
+                    f'数据集中的序列ID示例: {sample_id}, 类型: ({type(sample_id[0]), type(sample_id[1])})'
+                )
 
             for seq_id_tuple in plot_sequences:
                 pub_arg, cg_arg = seq_id_tuple
@@ -805,12 +844,15 @@ def predict_with_model(
                             for s in data_with_preds.sequences:
                                 s_pub, s_cg = s['seq_id']
                                 # 同样尝试类型转换
-                                if (s_pub == seq_pub and s_cg == seq_cg):
+                                if s_pub == seq_pub and s_cg == seq_cg:
                                     pred_seq = s
                                     break
                                 else:
                                     try:
-                                        if (type(s_pub)(seq_pub) == s_pub and type(s_cg)(seq_cg) == s_cg):
+                                        if (
+                                            type(s_pub)(seq_pub) == s_pub
+                                            and type(s_cg)(seq_cg) == s_cg
+                                        ):
                                             pred_seq = s
                                             break
                                     except (ValueError, TypeError):
@@ -830,10 +872,13 @@ def predict_with_model(
                                     time_steps,
                                     targets,
                                     predictions,
-                                    figs_dir / f'sequence_predictions_{filename_pub}_{filename_cg}.png',
+                                    figs_dir
+                                    / f'sequence_predictions_{filename_pub}_{filename_cg}.png',
                                     mask=None,
                                 )
-                                logger.info(f'已绘制序列预测图: {seq_pub}_{seq_cg} ({split_name}集)')
+                                logger.info(
+                                    f'已绘制序列预测图: {seq_pub}_{seq_cg} ({split_name}集)'
+                                )
                                 found = True
                                 break
                     if found:
@@ -844,14 +889,18 @@ def predict_with_model(
                     available_ids = []
                     for split_name, base, _, _ in all_bases:
                         for seq in base.sequences[:10]:  # 只显示前10个
-                            available_ids.append(f"{seq['seq_id']}")
-                    logger.warning(f'未找到序列: {pub_arg}_{cg_arg}。部分可用序列ID: {", ".join(available_ids)}...')
+                            available_ids.append(f'{seq["seq_id"]}')
+                    logger.warning(
+                        f'未找到序列: {pub_arg}_{cg_arg}。部分可用序列ID: {", ".join(available_ids)}...'
+                    )
 
-        results.update({
-            'train_metrics': train_result['metrics'],
-            'val_metrics': val_result['metrics'],
-            'test_metrics': test_result['metrics'],
-        })
+        results.update(
+            {
+                'train_metrics': train_result['metrics'],
+                'val_metrics': val_result['metrics'],
+                'test_metrics': test_result['metrics'],
+            }
+        )
 
     logger.info(f'预测完成，结果已保存到 {tables_dir}')
     return results
