@@ -58,7 +58,7 @@ def update_metrics_for_split(split_dir: Path) -> bool:
 
     for split in splits:
         csv_path = tables_dir / f"{split}_predictions.csv"
-        metrics_key = f"{split}_metrics"
+        metrics_key = f"{split}"
 
         if not csv_path.exists():
             print(f"  Warning: {csv_path} not found")
