@@ -721,19 +721,94 @@ def predict_with_model(
                     if rnn_dataset is not None:
                         daily_seq = rnn_dataset.daily_sequences[seq_idx]
                         mask = daily_seq['mask']
-                        start_day = daily_seq['start_day']
 
-                        sowdur_to_orig_idx = {int(sowdurs[i]): i for i in range(len(sowdurs))}
+                        # 检查dataset是否保存了原始索引信息（新代码）
+                        has_original_indices = 'original_indices' in daily_seq and 'original_sowdurs' in daily_seq
 
-                        for day_idx in range(len(mask)):
-                            if mask[day_idx]:
-                                day = start_day + day_idx
-                                if day in sowdur_to_orig_idx:
-                                    orig_idx = sowdur_to_orig_idx[day]
-                                    no_of_obs_list.append(no_of_obs[orig_idx])
-                                    publication_list.append(seq_id[0])
-                                    control_group_list.append(seq_id[1])
-                                    sowdur_list.append(day)
+                        if has_original_indices:
+                            # 使用dataset中保存的原始索引信息 - 最准确的方式
+                            original_indices = daily_seq['original_indices']
+                            original_sowdurs_daily = daily_seq['original_sowdurs']
+
+                            for day_idx in range(len(mask)):
+                                if mask[day_idx]:
+                                    orig_idx = original_indices[day_idx]
+                                    orig_sowdur = original_sowdurs_daily[day_idx]
+
+                                    if orig_idx >= 0 and orig_idx < len(no_of_obs):
+                                        no_of_obs_list.append(no_of_obs[orig_idx])
+                                        publication_list.append(seq_id[0])
+                                        control_group_list.append(seq_id[1])
+                                        sowdur_list.append(orig_sowdur)
+                                    else:
+                                        logger.warning(
+                                            f"序列 {seq_id} 中第 {day_idx} 天的原始索引 {orig_idx} 无效"
+                                        )
+                        else:
+                            # 向后兼容：如果没有保存原始索引信息，使用原来的方式
+                            start_day = daily_seq['start_day']
+
+                            # 使用列表保存所有原始观测点的 (int_sowdur, orig_idx, orig_sowdur)
+                            # 避免字典键冲突问题
+                            obs_info = []
+                            for i in range(len(sowdurs)):
+                                obs_info.append((int(sowdurs[i]), i, sowdurs[i]))
+
+                            # 对每个mask=True的点，按顺序匹配原始观测点
+                            obs_ptr = 0  # 指向当前待匹配的原始观测点
+                            for day_idx in range(len(mask)):
+                                if mask[day_idx]:
+                                    day = start_day + day_idx
+                                    # 找到对应的原始观测点
+                                    # 先尝试精确匹配int_day，同时确保我们按顺序匹配
+                                    while obs_ptr < len(obs_info):
+                                        int_sowdur, orig_idx, orig_sowdur = obs_info[obs_ptr]
+                                        if int_sowdur == day:
+                                            # 找到匹配
+                                            no_of_obs_list.append(no_of_obs[orig_idx])
+                                            publication_list.append(seq_id[0])
+                                            control_group_list.append(seq_id[1])
+                                            sowdur_list.append(orig_sowdur)  # 使用原始sowdur，不是int版本
+                                            obs_ptr += 1
+                                            break
+                                        elif int_sowdur > day:
+                                            # 原始数据跳过了某些天？这可能是数据问题
+                                            # 但为了安全，我们还是尝试查找之前是否有匹配的
+                                            # 回退查找
+                                            found = False
+                                            for back_idx in range(obs_ptr):
+                                                b_int_sowdur, b_orig_idx, b_orig_sowdur = obs_info[back_idx]
+                                                if b_int_sowdur == day:
+                                                    no_of_obs_list.append(no_of_obs[b_orig_idx])
+                                                    publication_list.append(seq_id[0])
+                                                    control_group_list.append(seq_id[1])
+                                                    sowdur_list.append(b_orig_sowdur)
+                                                    found = True
+                                                    break
+                                            if not found:
+                                                logger.warning(
+                                                    f"序列 {seq_id} 中找不到第 {day} 天对应的原始观测点"
+                                                )
+                                            break
+                                        else:
+                                            # int_sowdur < day，继续找下一个
+                                            obs_ptr += 1
+                                    else:
+                                        # obs_ptr 已经到头了，回退查找
+                                        found = False
+                                        for back_idx in range(len(obs_info)):
+                                            b_int_sowdur, b_orig_idx, b_orig_sowdur = obs_info[back_idx]
+                                            if b_int_sowdur == day:
+                                                no_of_obs_list.append(no_of_obs[b_orig_idx])
+                                                publication_list.append(seq_id[0])
+                                                control_group_list.append(seq_id[1])
+                                                sowdur_list.append(b_orig_sowdur)
+                                                found = True
+                                                break
+                                        if not found:
+                                            logger.warning(
+                                                f"序列 {seq_id} 中找不到第 {day} 天对应的原始观测点"
+                                            )
                     else:
                         no_of_obs_list.extend(no_of_obs)
                         publication_list.extend([seq_id[0]] * len(no_of_obs))

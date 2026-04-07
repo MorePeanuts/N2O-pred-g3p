@@ -544,10 +544,21 @@ class N2ODatasetForDailyStepRNN(Dataset):
                 "daily_categorical": [],
                 "daily_targets": [],
                 "mask": [],  # True表示真实测量点，False表示插值点
+                "original_indices": [],  # 保存mask=True对应的原始索引，-1表示插值点
+                "original_sowdurs": [],  # 保存原始sowdur值
             }
 
-            # 创建观测索引映射
-            obs_map = {int(sowdurs[i]): i for i in range(seq_len)}
+            # 创建观测索引映射 - 处理可能的int重复问题
+            # 使用列表存储所有观测点信息
+            obs_list = [(int(sowdurs[i]), i, sowdurs[i]) for i in range(seq_len)]
+            obs_ptr = 0  # 当前待匹配的观测点指针
+
+            # 同时创建一个辅助映射用于插值（取首次出现的索引）
+            # 这仅用于插值，不会影响真实测量点的匹配
+            obs_map_for_interp = {}
+            for int_day, orig_idx, _ in obs_list:
+                if int_day not in obs_map_for_interp:
+                    obs_map_for_interp[int_day] = orig_idx
 
             # 提取原始动态数据用于插值
             temp_vals = [seq["numeric_dynamic"][i][0] for i in range(seq_len)]
@@ -559,9 +570,43 @@ class N2ODatasetForDailyStepRNN(Dataset):
             last_fert_amount = 0
 
             for day in range(start_day, end_day + 1):
-                if day in obs_map:
+                # 检查是否是真实测量点 - 按顺序匹配
+                is_obs = False
+                idx = -1
+                orig_sowdur = float(day)  # 默认使用day作为sowdur
+
+                # 先检查当前指针位置的观测点
+                if obs_ptr < len(obs_list):
+                    obs_int_day, obs_idx, obs_sowdur_val = obs_list[obs_ptr]
+                    if obs_int_day == day:
+                        # 找到匹配的观测点
+                        is_obs = True
+                        idx = obs_idx
+                        orig_sowdur = obs_sowdur_val
+                        obs_ptr += 1
+                    elif obs_int_day < day:
+                        # 跳过一些天？尝试在剩余的观测点中查找
+                        for i in range(obs_ptr, len(obs_list)):
+                            obs_int_day_i, obs_idx_i, obs_sowdur_val_i = obs_list[i]
+                            if obs_int_day_i == day:
+                                is_obs = True
+                                idx = obs_idx_i
+                                orig_sowdur = obs_sowdur_val_i
+                                obs_ptr = i + 1
+                                break
+                            elif obs_int_day_i > day:
+                                break
+                else:
+                    # 已经处理完所有观测点，回退查找
+                    for obs_int_day_i, obs_idx_i, obs_sowdur_val_i in obs_list:
+                        if obs_int_day_i == day:
+                            is_obs = True
+                            idx = obs_idx_i
+                            orig_sowdur = obs_sowdur_val_i
+                            break
+
+                if is_obs and idx >= 0:
                     # 真实测量点
-                    idx = obs_map[day]
                     # RNN 只使用前 6 个动态特征（索引 0-5），不包括 Total N amount（索引 6）
                     # 特征顺序：Temp, Prec, ST, WFPS, Split N amount, ferdur
                     daily_numeric = list(seq["numeric_dynamic"][idx][:6])
@@ -577,20 +622,23 @@ class N2ODatasetForDailyStepRNN(Dataset):
                     daily_data["daily_categorical"].append(daily_categorical)
                     daily_data["daily_targets"].append(target)
                     daily_data["mask"].append(True)
+                    daily_data["original_indices"].append(idx)
+                    daily_data["original_sowdurs"].append(orig_sowdur)
                 else:
                     # 插值点
                     # 线性插值数值特征（除了Prec和Split N amount）
                     day_idx = day - start_day
 
-                    # 找到前后最近的观测点用于插值
-                    before_days = [d for d in obs_map.keys() if d < day]
-                    after_days = [d for d in obs_map.keys() if d > day]
+                    # 找到前后最近的观测点用于插值 - 从obs_list获取所有int_day
+                    obs_int_days = [od for od, _, _ in obs_list]
+                    before_days = [d for d in obs_int_days if d < day]
+                    after_days = [d for d in obs_int_days if d > day]
 
                     if before_days and after_days:
                         before_day = max(before_days)
                         after_day = min(after_days)
-                        before_idx = obs_map[before_day]
-                        after_idx = obs_map[after_day]
+                        before_idx = obs_map_for_interp[before_day]
+                        after_idx = obs_map_for_interp[after_day]
 
                         # 插值比例
                         alpha = (day - before_day) / (after_day - before_day)
@@ -611,14 +659,14 @@ class N2ODatasetForDailyStepRNN(Dataset):
                     elif before_days:
                         # 只有之前的点，前向填充
                         before_day = max(before_days)
-                        before_idx = obs_map[before_day]
+                        before_idx = obs_map_for_interp[before_day]
                         temp = seq["numeric_dynamic"][before_idx][0]
                         st = seq["numeric_dynamic"][before_idx][2]
                         wfps = seq["numeric_dynamic"][before_idx][3]
                     else:
                         # 只有之后的点，后向填充
                         after_day = min(after_days)
-                        after_idx = obs_map[after_day]
+                        after_idx = obs_map_for_interp[after_day]
                         temp = seq["numeric_dynamic"][after_idx][0]
                         st = seq["numeric_dynamic"][after_idx][2]
                         wfps = seq["numeric_dynamic"][after_idx][3]
@@ -629,12 +677,12 @@ class N2ODatasetForDailyStepRNN(Dataset):
                     # Split N amount: 使用前向填充，保持为"上次施肥量"
                     if before_days:
                         before_day = max(before_days)
-                        before_idx = obs_map[before_day]
+                        before_idx = obs_map_for_interp[before_day]
                         split_n = seq["numeric_dynamic"][before_idx][4]
                     else:
                         # 后向填充
                         after_day = min(after_days)
-                        after_idx = obs_map[after_day]
+                        after_idx = obs_map_for_interp[after_day]
                         split_n = seq["numeric_dynamic"][after_idx][4]
 
                     # ferdur: 距离上次施肥的天数
@@ -648,20 +696,20 @@ class N2ODatasetForDailyStepRNN(Dataset):
                     # 分类特征前向填充
                     if before_days:
                         before_day = max(before_days)
-                        before_idx = obs_map[before_day]
+                        before_idx = obs_map_for_interp[before_day]
                         daily_categorical = list(seq["categorical_dynamic"][before_idx])
                     else:
                         # 后向填充
                         after_day = min(after_days)
-                        after_idx = obs_map[after_day]
+                        after_idx = obs_map_for_interp[after_day]
                         daily_categorical = list(seq["categorical_dynamic"][after_idx])
 
                     # 目标值插值（但不会用于损失计算）
                     if before_days and after_days:
                         before_day = max(before_days)
                         after_day = min(after_days)
-                        before_idx = obs_map[before_day]
-                        after_idx = obs_map[after_day]
+                        before_idx = obs_map_for_interp[before_day]
+                        after_idx = obs_map_for_interp[after_day]
                         alpha = (day - before_day) / (after_day - before_day)
                         target = (
                             seq["targets"][before_idx] * (1 - alpha)
@@ -669,17 +717,19 @@ class N2ODatasetForDailyStepRNN(Dataset):
                         )
                     elif before_days:
                         before_day = max(before_days)
-                        before_idx = obs_map[before_day]
+                        before_idx = obs_map_for_interp[before_day]
                         target = seq["targets"][before_idx]
                     else:
                         after_day = min(after_days)
-                        after_idx = obs_map[after_day]
+                        after_idx = obs_map_for_interp[after_day]
                         target = seq["targets"][after_idx]
 
                     daily_data["daily_numeric"].append(daily_numeric)
                     daily_data["daily_categorical"].append(daily_categorical)
                     daily_data["daily_targets"].append(target)
                     daily_data["mask"].append(False)
+                    daily_data["original_indices"].append(-1)
+                    daily_data["original_sowdurs"].append(float(day))
 
             self.daily_sequences.append(daily_data)
 
