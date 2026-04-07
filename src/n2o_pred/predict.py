@@ -698,11 +698,7 @@ def predict_with_model(
 
         # 获取定位列信息
         def _get_location_cols_from_base(base_data, rnn_dataset=None, use_mask=False):
-            """从基础数据集中获取定位列信息
-
-            Returns:
-                tuple: (dict, np.ndarray | None) - 包含定位列的字典，以及有效的索引掩码（仅rnn-daily模型返回）
-            """
+            """从基础数据集中获取定位列信息"""
             if not use_mask:
                 df = base_data.flatten_to_dataframe()
                 return {
@@ -710,14 +706,12 @@ def predict_with_model(
                     'Publication': df['Publication'].values,
                     'control_group': df['control_group'].values,
                     'sowdur': df['sowdur'].values,
-                }, None
+                }
             else:
                 no_of_obs_list = []
                 publication_list = []
                 control_group_list = []
                 sowdur_list = []
-                valid_indices = []  # 记录哪些全局索引是有效的
-                global_idx = 0
 
                 for seq_idx, seq in enumerate(base_data.sequences):
                     seq_id = seq['seq_id']
@@ -740,60 +734,42 @@ def predict_with_model(
                                     publication_list.append(seq_id[0])
                                     control_group_list.append(seq_id[1])
                                     sowdur_list.append(day)
-                                    valid_indices.append(global_idx)
-                            global_idx += 1
                     else:
                         no_of_obs_list.extend(no_of_obs)
                         publication_list.extend([seq_id[0]] * len(no_of_obs))
                         control_group_list.extend([seq_id[1]] * len(no_of_obs))
                         sowdur_list.extend(sowdurs)
-                        valid_indices.extend(range(global_idx, global_idx + len(no_of_obs)))
-                        global_idx += len(no_of_obs)
 
                 return {
                     'No. of obs': np.array(no_of_obs_list),
                     'Publication': np.array(publication_list),
                     'control_group': np.array(control_group_list),
                     'sowdur': np.array(sowdur_list),
-                }, np.array(valid_indices, dtype=int)
+                }
 
-        train_loc_cols, train_valid_idx = _get_location_cols_from_base(
+        train_loc_cols = _get_location_cols_from_base(
             train_base, train_dataset if use_mask else None, use_mask=use_mask
         )
-        val_loc_cols, val_valid_idx = _get_location_cols_from_base(
+        val_loc_cols = _get_location_cols_from_base(
             val_base, val_dataset if use_mask else None, use_mask=use_mask
         )
-        test_loc_cols, test_valid_idx = _get_location_cols_from_base(
+        test_loc_cols = _get_location_cols_from_base(
             test_base, test_dataset if use_mask else None, use_mask=use_mask
         )
 
         from .evaluation import save_predictions_to_csv
 
-        # 确定使用的预测和目标值 - 直接使用完整的predictions,然后用valid_idx过滤
-        # 这样可以确保与location列使用完全相同的过滤逻辑
-        def get_filtered_predictions_and_targets(result, valid_idx):
-            preds = result['predictions']
-            targs = result['targets'] if 'targets' in result else None
+        # 确定使用的预测和目标值
+        def get_predictions_and_targets(result):
+            if use_mask and 'targets_masked' in result:
+                return result['predictions'][result['masks']] if 'masks' in result else result[
+                    'predictions'
+                ], result['targets_masked']
+            return result['predictions'], result['targets']
 
-            if valid_idx is not None:
-                # 使用与location列相同的索引来过滤
-                preds = preds[valid_idx]
-                if targs is not None:
-                    # 如果有targets_full(带NaN的)，我们需要过滤它
-                    if 'targets_masked' in result:
-                        targs = result['targets_masked']
-                    else:
-                        targs = targs[valid_idx]
-            else:
-                # 对于非mask模式，检查是否有targets_masked
-                if use_mask and 'targets_masked' in result:
-                    targs = result['targets_masked']
-
-            return preds, targs
-
-        train_preds, train_targets = get_filtered_predictions_and_targets(train_result, train_valid_idx)
-        val_preds, val_targets = get_filtered_predictions_and_targets(val_result, val_valid_idx)
-        test_preds, test_targets = get_filtered_predictions_and_targets(test_result, test_valid_idx)
+        train_preds, train_targets = get_predictions_and_targets(train_result)
+        val_preds, val_targets = get_predictions_and_targets(val_result)
+        test_preds, test_targets = get_predictions_and_targets(test_result)
 
         save_predictions_to_csv(
             train_preds,
