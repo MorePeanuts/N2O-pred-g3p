@@ -56,7 +56,7 @@ def _get_location_cols_from_base(base_data, rnn_dataset=None, use_mask=False):
         use_mask: 是否使用掩码（rnn-daily模型为True）
 
     Returns:
-        dict: 包含定位列的字典
+        tuple: (dict, np.ndarray | None) - 包含定位列的字典，以及有效的索引掩码（仅rnn-daily模型返回）
     """
     if not use_mask:
         # 对于rnn-obs模型，直接使用所有数据
@@ -66,13 +66,15 @@ def _get_location_cols_from_base(base_data, rnn_dataset=None, use_mask=False):
             "Publication": df["Publication"].values,
             "control_group": df["control_group"].values,
             "sowdur": df["sowdur"].values,
-        }
+        }, None
     else:
         # 对于rnn-daily模型，只收集真实测量点
         no_of_obs_list = []
         publication_list = []
         control_group_list = []
         sowdur_list = []
+        valid_indices = []  # 记录哪些全局索引是有效的
+        global_idx = 0
 
         for seq_idx, seq in enumerate(base_data.sequences):
             seq_id = seq["seq_id"]
@@ -88,7 +90,7 @@ def _get_location_cols_from_base(base_data, rnn_dataset=None, use_mask=False):
                 # 创建从 sowdur 到原始索引的映射
                 sowdur_to_orig_idx = {int(sowdurs[i]): i for i in range(len(sowdurs))}
 
-                # 只收集掩码为True的点
+                # 只收集掩码为True且day在原始sowdurs中的点
                 for day_idx in range(len(mask)):
                     if mask[day_idx]:
                         day = start_day + day_idx
@@ -98,19 +100,23 @@ def _get_location_cols_from_base(base_data, rnn_dataset=None, use_mask=False):
                             publication_list.append(seq_id[0])
                             control_group_list.append(seq_id[1])
                             sowdur_list.append(day)
+                            valid_indices.append(global_idx)
+                    global_idx += 1
             else:
                 # 如果没有rnn_dataset，使用所有点
                 no_of_obs_list.extend(no_of_obs)
                 publication_list.extend([seq_id[0]] * len(no_of_obs))
                 control_group_list.extend([seq_id[1]] * len(no_of_obs))
                 sowdur_list.extend(sowdurs)
+                valid_indices.extend(range(global_idx, global_idx + len(no_of_obs)))
+                global_idx += len(no_of_obs)
 
         return {
             "No. of obs": np.array(no_of_obs_list),
             "Publication": np.array(publication_list),
             "control_group": np.array(control_group_list),
             "sowdur": np.array(sowdur_list),
-        }
+        }, np.array(valid_indices, dtype=int)
 
 
 def _parallel_train_worker(args_tuple):
@@ -434,9 +440,9 @@ def _train_rnn_obs_worker(train_base, val_base, test_base, config, save_dir, dev
     )
 
     # 3. 保存预测结果到CSV
-    train_loc_cols = _get_location_cols_from_base(train_base, use_mask=False)
-    val_loc_cols = _get_location_cols_from_base(val_base, use_mask=False)
-    test_loc_cols = _get_location_cols_from_base(test_base, use_mask=False)
+    train_loc_cols, _ = _get_location_cols_from_base(train_base, use_mask=False)
+    val_loc_cols, _ = _get_location_cols_from_base(val_base, use_mask=False)
+    test_loc_cols, _ = _get_location_cols_from_base(test_base, use_mask=False)
     save_predictions_to_csv(
         train_result["train_predictions"],
         train_result["train_targets"],
@@ -634,24 +640,33 @@ def _train_rnn_daily_worker(train_base, val_base, test_base, config, save_dir, d
     )
 
     # 3. 保存预测结果到CSV
-    train_loc_cols = _get_location_cols_from_base(train_base, train_dataset, use_mask=True)
-    val_loc_cols = _get_location_cols_from_base(val_base, val_dataset, use_mask=True)
-    test_loc_cols = _get_location_cols_from_base(test_base, test_dataset, use_mask=True)
+    train_loc_cols, train_valid_idx = _get_location_cols_from_base(train_base, train_dataset, use_mask=True)
+    val_loc_cols, val_valid_idx = _get_location_cols_from_base(val_base, val_dataset, use_mask=True)
+    test_loc_cols, test_valid_idx = _get_location_cols_from_base(test_base, test_dataset, use_mask=True)
+
+    # 使用与location列相同的过滤逻辑来过滤预测结果
+    train_preds_filtered = train_result["train_predictions"][train_valid_idx] if train_valid_idx is not None else train_result["train_predictions"]
+    train_targs_filtered = train_result["train_targets"][train_valid_idx] if train_valid_idx is not None else train_result["train_targets"]
+    val_preds_filtered = train_result["val_predictions"][val_valid_idx] if val_valid_idx is not None else train_result["val_predictions"]
+    val_targs_filtered = train_result["val_targets"][val_valid_idx] if val_valid_idx is not None else train_result["val_targets"]
+    test_preds_filtered = train_result["test_predictions"][test_valid_idx] if test_valid_idx is not None else train_result["test_predictions"]
+    test_targs_filtered = train_result["test_targets"][test_valid_idx] if test_valid_idx is not None else train_result["test_targets"]
+
     save_predictions_to_csv(
-        train_result["train_predictions"],
-        train_result["train_targets"],
+        train_preds_filtered,
+        train_targs_filtered,
         tables_dir / "train_predictions.csv",
         additional_cols=train_loc_cols,
     )
     save_predictions_to_csv(
-        train_result["val_predictions"],
-        train_result["val_targets"],
+        val_preds_filtered,
+        val_targs_filtered,
         tables_dir / "val_predictions.csv",
         additional_cols=val_loc_cols,
     )
     save_predictions_to_csv(
-        train_result["test_predictions"],
-        train_result["test_targets"],
+        test_preds_filtered,
+        test_targs_filtered,
         tables_dir / "test_predictions.csv",
         additional_cols=test_loc_cols,
     )
@@ -1447,24 +1462,41 @@ class ExperimentRunner:
         )
 
         # 3. 保存预测结果到CSV
-        train_loc_cols = _get_location_cols_from_base(train_base, train_dataset if use_mask else None, use_mask=use_mask)
-        val_loc_cols = _get_location_cols_from_base(val_base, val_dataset if use_mask else None, use_mask=use_mask)
-        test_loc_cols = _get_location_cols_from_base(test_base, test_dataset if use_mask else None, use_mask=use_mask)
+        train_loc_cols, train_valid_idx = _get_location_cols_from_base(train_base, train_dataset if use_mask else None, use_mask=use_mask)
+        val_loc_cols, val_valid_idx = _get_location_cols_from_base(val_base, val_dataset if use_mask else None, use_mask=use_mask)
+        test_loc_cols, test_valid_idx = _get_location_cols_from_base(test_base, test_dataset if use_mask else None, use_mask=use_mask)
+
+        # 使用与location列相同的过滤逻辑来过滤预测结果
+        if use_mask:
+            train_preds_filtered = train_result["train_predictions"][train_valid_idx] if train_valid_idx is not None else train_result["train_predictions"]
+            train_targs_filtered = train_result["train_targets"][train_valid_idx] if train_valid_idx is not None else train_result["train_targets"]
+            val_preds_filtered = train_result["val_predictions"][val_valid_idx] if val_valid_idx is not None else train_result["val_predictions"]
+            val_targs_filtered = train_result["val_targets"][val_valid_idx] if val_valid_idx is not None else train_result["val_targets"]
+            test_preds_filtered = train_result["test_predictions"][test_valid_idx] if test_valid_idx is not None else train_result["test_predictions"]
+            test_targs_filtered = train_result["test_targets"][test_valid_idx] if test_valid_idx is not None else train_result["test_targets"]
+        else:
+            train_preds_filtered = train_result["train_predictions"]
+            train_targs_filtered = train_result["train_targets"]
+            val_preds_filtered = train_result["val_predictions"]
+            val_targs_filtered = train_result["val_targets"]
+            test_preds_filtered = train_result["test_predictions"]
+            test_targs_filtered = train_result["test_targets"]
+
         save_predictions_to_csv(
-            train_result["train_predictions"],
-            train_result["train_targets"],
+            train_preds_filtered,
+            train_targs_filtered,
             tables_dir / "train_predictions.csv",
             additional_cols=train_loc_cols,
         )
         save_predictions_to_csv(
-            train_result["val_predictions"],
-            train_result["val_targets"],
+            val_preds_filtered,
+            val_targs_filtered,
             tables_dir / "val_predictions.csv",
             additional_cols=val_loc_cols,
         )
         save_predictions_to_csv(
-            train_result["test_predictions"],
-            train_result["test_targets"],
+            test_preds_filtered,
+            test_targs_filtered,
             tables_dir / "test_predictions.csv",
             additional_cols=test_loc_cols,
         )
