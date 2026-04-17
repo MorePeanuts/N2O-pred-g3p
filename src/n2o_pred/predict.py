@@ -479,15 +479,17 @@ def predict_with_model(
     tables_dir = output_path / 'tables'
     tables_dir.mkdir(parents=True, exist_ok=True)
 
-    figs_dir = None
-    if plot_sequences:
-        figs_dir = output_path / 'figs'
-        figs_dir.mkdir(parents=True, exist_ok=True)
+    # 总是创建figs目录，用于保存特征重要性图
+    figs_dir = output_path / 'figs'
+    figs_dir.mkdir(parents=True, exist_ok=True)
 
     results = {
         'model_type': model_type,
         'seed': seed,
     }
+
+    # 导入需要的函数
+    from .evaluation import save_predictions_to_csv, compute_shap_values, plot_feature_importance
 
     if model_type == 'rf':
         # 随机森林预测 - 传入BaseN2ODataset而不是DataFrame，这样返回的data_with_predictions会有sequences属性
@@ -495,14 +497,12 @@ def predict_with_model(
         val_result = predictor.predict(val_base, device=device)
         test_result = predictor.predict(test_base, device=device)
 
-        # 仍然需要DataFrame用于保存CSV
+        # 仍然需要DataFrame用于保存CSV和SHAP分析
         train_df = train_base.flatten_to_dataframe_for_rf()
         val_df = val_base.flatten_to_dataframe_for_rf()
         test_df = test_base.flatten_to_dataframe_for_rf()
 
         # 保存预测结果
-        from .evaluation import save_predictions_to_csv
-
         save_predictions_to_csv(
             train_result['predictions'],
             train_result['targets'],
@@ -537,16 +537,24 @@ def predict_with_model(
             },
         )
 
-        # 保存特征重要性（如果有）
-        if hasattr(predictor.model, 'get_feature_importances'):
-            feature_importances = predictor.model.get_feature_importances()
+        # 使用compute_shap_values计算特征重要性
+        try:
+            logger.info("计算RF模型的特征重要性（使用SHAP）...")
+            shap_values, feature_names = compute_shap_values(
+                predictor.model, test_df, model_type, device, max_samples=100
+            )
+            # 保存特征重要性CSV
             importance_df = pd.DataFrame(
                 {
-                    'feature': list(feature_importances.keys()),
-                    'importance': list(feature_importances.values()),
+                    'feature': feature_names,
+                    'importance': shap_values,
                 }
             ).sort_values('importance', ascending=False)
             importance_df.to_csv(tables_dir / 'feature_importance.csv', index=False)
+            # 保存特征重要性图
+            plot_feature_importance(feature_names, shap_values, figs_dir / 'feature_importance.png')
+        except Exception as e:
+            logger.warning(f'SHAP分析失败: {e}')
 
         # 绘制序列预测图
         if plot_sequences and figs_dir is not None:
@@ -669,7 +677,7 @@ def predict_with_model(
 
         use_mask = model_type == 'rnn-daily'
 
-        # 准备数据集
+        # 准备数据集（需要创建dataset用于SHAP分析
         if model_type == 'rnn-obs':
             train_dataset = N2ODatasetForObsStepRNN(
                 train_base, fit_scalers=False, scalers=predictor.scalers
@@ -789,6 +797,25 @@ def predict_with_model(
             tables_dir / 'test_predictions.csv',
             additional_cols=test_loc_cols,
         )
+
+        # 使用compute_shap_values计算特征重要性
+        try:
+            logger.info("计算RNN模型的特征重要性（使用SHAP）...")
+            shap_values, feature_names = compute_shap_values(
+                predictor.model, test_dataset, model_type, device, max_samples=100
+            )
+            # 保存特征重要性CSV
+            importance_df = pd.DataFrame(
+                {
+                    'feature': feature_names,
+                    'importance': shap_values,
+                }
+            ).sort_values('importance', ascending=False)
+            importance_df.to_csv(tables_dir / 'feature_importance.csv', index=False)
+            # 保存特征重要性图
+            plot_feature_importance(feature_names, shap_values, figs_dir / 'feature_importance.png')
+        except Exception as e:
+            logger.warning(f'SHAP分析失败: {e}')
 
         # 绘制序列预测图
         if plot_sequences and figs_dir is not None:
