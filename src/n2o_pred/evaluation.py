@@ -600,6 +600,9 @@ def compute_shap_values(
     device: str = "cpu",
     max_samples: int = 1000,
     fast_mode: bool = True,
+    background_size: int | None = None,
+    n_explain: int | None = None,
+    nsamples: int | None = None,
 ) -> tuple[np.ndarray, list[str]]:
     """
     计算SHAP值
@@ -611,6 +614,9 @@ def compute_shap_values(
         device: 设备
         max_samples: 最大样本数（用于限制SHAP计算的样本数）
         fast_mode: 是否使用快速模式（RNN模型适用，默认True）
+        background_size: 背景样本数（RNN专用，None则使用默认值）
+        n_explain: 解释样本数（RNN专用，None则使用默认值）
+        nsamples: 每个解释的扰动样本数（RNN专用，None则使用默认值）
 
     Returns:
         (SHAP值, 特征名称列表)
@@ -664,15 +670,20 @@ def compute_shap_values(
         if fast_mode:
             # 快速模式：极大减少样本数量
             n_samples = min(len(data), max_samples // 5)  # 只使用 1/5 的样本
-            background_size = min(30, n_samples // 5)  # 背景数据 30 个
-            n_explain = min(50, n_samples)  # 解释样本 50 个
-            nsamples = 32 if device != "cpu" and torch.cuda.is_available() else 16
+            default_background_size = min(30, n_samples // 5)  # 背景数据 30 个
+            default_n_explain = min(50, n_samples)  # 解释样本 50 个
+            default_nsamples = 32 if device != "cpu" and torch.cuda.is_available() else 16
         else:
             # 标准模式：较少样本但更准确
             n_samples = min(len(data), max_samples // 2)
-            background_size = min(50, n_samples // 4)
-            n_explain = min(100, n_samples)
-            nsamples = 64 if device != "cpu" and torch.cuda.is_available() else 32
+            default_background_size = min(50, n_samples // 4)
+            default_n_explain = min(100, n_samples)
+            default_nsamples = 64 if device != "cpu" and torch.cuda.is_available() else 32
+
+        # 使用自定义参数（如果提供）
+        background_size = background_size if background_size is not None else default_background_size
+        n_explain = n_explain if n_explain is not None else default_n_explain
+        nsamples = nsamples if nsamples is not None else default_nsamples
 
         sample_indices = np.random.choice(len(data), n_samples, replace=False)
 
