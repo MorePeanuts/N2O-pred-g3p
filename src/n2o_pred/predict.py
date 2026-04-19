@@ -541,7 +541,7 @@ def predict_with_model(
         try:
             logger.info("计算RF模型的特征重要性（使用SHAP）...")
             shap_values, feature_names = compute_shap_values(
-                predictor.model, test_df, model_type, device, max_samples=1000
+                predictor.model, test_df, model_type, device, max_samples=100
             )
             # 保存特征重要性CSV
             importance_df = pd.DataFrame(
@@ -802,9 +802,8 @@ def predict_with_model(
         try:
             logger.info("计算RNN模型的特征重要性（使用SHAP）...")
             shap_values, feature_names = compute_shap_values(
-                predictor.model, test_dataset, model_type, device,
-                max_samples=2000, fast_mode=False,
-                background_size=300, n_explain=600, nsamples=192
+                predictor.model, test_dataset, model_type, device, max_samples=152,
+                background_size=50, n_explain=100, nsamples=32
             )
             # 保存特征重要性CSV
             importance_df = pd.DataFrame(

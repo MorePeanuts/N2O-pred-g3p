@@ -614,9 +614,9 @@ def compute_shap_values(
         device: 设备
         max_samples: 最大样本数（用于限制SHAP计算的样本数）
         fast_mode: 是否使用快速模式（RNN模型适用，默认True）
-        background_size: 背景样本数（RNN专用，None则使用默认值）
-        n_explain: 解释样本数（RNN专用，None则使用默认值）
-        nsamples: 每个解释的扰动样本数（RNN专用，None则使用默认值）
+        background_size: 背景数据样本数（覆盖默认值）
+        n_explain: 解释样本数（覆盖默认值）
+        nsamples: SHAP扰动样本数（覆盖默认值）
 
     Returns:
         (SHAP值, 特征名称列表)
@@ -666,24 +666,26 @@ def compute_shap_values(
         # 创建模型包装器
         model_wrapper = RNNModelWrapper(model, data, device)
 
-        # 根据快速模式调整样本数量
-        if fast_mode:
+        # 根据快速模式或自定义参数确定样本数量
+        if background_size is not None and n_explain is not None and nsamples is not None:
+            # 使用自定义参数
+            n_samples = min(len(data), max_samples)
+            final_background_size = background_size
+            final_n_explain = n_explain
+            final_nsamples = nsamples
+            logger.info(f"使用自定义SHAP参数: 背景样本={final_background_size}, 解释样本={final_n_explain}, 扰动样本={final_nsamples}")
+        elif fast_mode:
             # 快速模式：极大减少样本数量
             n_samples = min(len(data), max_samples // 5)  # 只使用 1/5 的样本
-            default_background_size = min(30, n_samples // 5)  # 背景数据 30 个
-            default_n_explain = min(50, n_samples)  # 解释样本 50 个
-            default_nsamples = 32 if device != "cpu" and torch.cuda.is_available() else 16
+            final_background_size = min(30, n_samples // 5)  # 背景数据 30 个
+            final_n_explain = min(50, n_samples)  # 解释样本 50 个
+            final_nsamples = 32 if device != "cpu" and torch.cuda.is_available() else 16
         else:
             # 标准模式：较少样本但更准确
             n_samples = min(len(data), max_samples // 2)
-            default_background_size = min(50, n_samples // 4)
-            default_n_explain = min(100, n_samples)
-            default_nsamples = 64 if device != "cpu" and torch.cuda.is_available() else 32
-
-        # 使用自定义参数（如果提供）
-        background_size = background_size if background_size is not None else default_background_size
-        n_explain = n_explain if n_explain is not None else default_n_explain
-        nsamples = nsamples if nsamples is not None else default_nsamples
+            final_background_size = min(50, n_samples // 4)
+            final_n_explain = min(100, n_samples)
+            final_nsamples = 64 if device != "cpu" and torch.cuda.is_available() else 32
 
         sample_indices = np.random.choice(len(data), n_samples, replace=False)
 
@@ -692,26 +694,26 @@ def compute_shap_values(
         feature_matrix = model_wrapper._prepare_features(sample_indices)
 
         # 选择背景数据
-        background_indices = np.random.choice(len(feature_matrix), background_size, replace=False)
+        background_indices = np.random.choice(len(feature_matrix), final_background_size, replace=False)
         background_data = feature_matrix[background_indices]
 
-        logger.info(f"背景数据样本数: {background_size}")
+        logger.info(f"背景数据样本数: {final_background_size}")
 
         # 创建SHAP解释器
         logger.info("创建SHAP解释器...")
         explainer = shap.KernelExplainer(model_wrapper.predict, background_data)
 
         # 选择要解释的样本
-        explain_indices = np.random.choice(len(feature_matrix), n_explain, replace=False)
+        explain_indices = np.random.choice(len(feature_matrix), final_n_explain, replace=False)
         explain_data = feature_matrix[explain_indices]
 
-        logger.info(f"解释样本数: {n_explain}, SHAP采样次数: {nsamples}")
+        logger.info(f"解释样本数: {final_n_explain}, SHAP采样次数: {final_nsamples}")
 
         # 计算SHAP值
-        time_estimate = (background_size * n_explain * nsamples) / (32 * 100)  # 粗略估计（秒）
+        time_estimate = (final_background_size * final_n_explain * final_nsamples) / (32 * 100)  # 粗略估计（秒）
         logger.info(f"计算SHAP值（预计 {time_estimate:.1f} 秒）...")
 
-        shap_values = explainer.shap_values(explain_data, nsamples=nsamples)
+        shap_values = explainer.shap_values(explain_data, nsamples=final_nsamples)
 
         logger.info(f"SHAP值计算完成，形状: {shap_values.shape}")
 
