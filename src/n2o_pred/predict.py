@@ -537,11 +537,14 @@ def predict_with_model(
             },
         )
 
-        # 使用compute_shap_values计算特征重要性
+        # 使用compute_shap_values计算特征重要性（在所有数据集上）
         try:
             logger.info("计算RF模型的特征重要性（使用SHAP）...")
+            # 合并所有数据集
+            all_df = pd.concat([train_df, val_df, test_df], ignore_index=True)
             shap_values, feature_names = compute_shap_values(
-                predictor.model, test_df, model_type, device, max_samples=100
+                predictor.model, all_df, model_type, device, max_samples=len(all_df),
+                background_size=100, n_explain=200, nsamples=40
             )
             # 保存特征重要性CSV
             importance_df = pd.DataFrame(
@@ -798,12 +801,24 @@ def predict_with_model(
             additional_cols=test_loc_cols,
         )
 
-        # 使用compute_shap_values计算特征重要性
+        # 使用compute_shap_values计算特征重要性（在所有数据集上）
         try:
             logger.info("计算RNN模型的特征重要性（使用SHAP）...")
+            # 合并所有数据集
+            all_sequences = train_base.sequences + val_base.sequences + test_base.sequences
+            all_base = BaseN2ODataset(sequences=all_sequences)
+            # 创建对应的 RNN 数据集
+            if model_type == 'rnn-obs':
+                all_dataset = N2ODatasetForObsStepRNN(
+                    all_base, fit_scalers=False, scalers=predictor.scalers
+                )
+            else:
+                all_dataset = N2ODatasetForDailyStepRNN(
+                    all_base, fit_scalers=False, scalers=predictor.scalers
+                )
             shap_values, feature_names = compute_shap_values(
-                predictor.model, test_dataset, model_type, device, max_samples=152,
-                background_size=50, n_explain=100, nsamples=32
+                predictor.model, all_dataset, model_type, device, max_samples=len(all_sequences),
+                background_size=100, n_explain=200, nsamples=40
             )
             # 保存特征重要性CSV
             importance_df = pd.DataFrame(
