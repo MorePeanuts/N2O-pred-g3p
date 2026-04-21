@@ -394,6 +394,7 @@ def predict_with_model(
     output_path: Path | str | None = None,
     device: str = 'cpu',
     plot_sequences: list[tuple[str, str]] | None = None,
+    shap_seed: int = 42,
 ) -> dict[str, Any]:
     """
     使用训练好的模型进行在对应的数据集划分上进行预测的便捷函数
@@ -404,6 +405,7 @@ def predict_with_model(
         output_path: 输出路径（保存带预测结果的数据，包括feature_importance.csv, test_predictions.csv, train_predictions.csv, val_predictions.csv）
         device: 设备
         plot_sequences: 需要绘制预测图的序列ID列表，每个元素是(publication, control_group)元组
+        shap_seed: SHAP分析的随机种子，用于保证结果可复现
 
     Returns:
         预测结果
@@ -551,6 +553,7 @@ def predict_with_model(
                 background_size=50,
                 n_explain=100,
                 nsamples=32,
+                shap_seed=shap_seed,
             )
             # 保存特征重要性CSV
             importance_df = pd.DataFrame(
@@ -831,6 +834,7 @@ def predict_with_model(
                 background_size=50,
                 n_explain=100,
                 nsamples=32,
+                shap_seed=shap_seed,
             )
             # 保存特征重要性CSV
             importance_df = pd.DataFrame(

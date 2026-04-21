@@ -183,6 +183,7 @@ def cmd_predict(args):
             output_path=output_path,
             device=args.device,
             plot_sequences=plot_sequences,
+            shap_seed=args.shap_seed,
         )
 
         logger.info('预测完成！')
@@ -215,6 +216,9 @@ def main() -> None:
 
   # 预测并绘制特定序列的预测图
   n2o-pred predict --model outputs/exp_xxx/split_42 --dataset datasets/data_EUR_processed.pkl --plot 44,3 58,3
+
+  # 预测并指定SHAP随机种子保证可复现
+  n2o-pred predict --model outputs/exp_xxx/split_42 --dataset datasets/data_EUR_processed.pkl --shap-seed 42
 
   # 预测（TIF格式数据）
   n2o-pred predict --model outputs/exp_xxx/split_42 --dataset input_2020 --output predictions/
@@ -293,6 +297,12 @@ def main() -> None:
         type=str,
         nargs='*',
         help='需要绘制预测图的序列，格式为 "publication,control_group"，例如 --plot 44,3 58,3',
+    )
+    parser_predict.add_argument(
+        '--shap-seed',
+        type=int,
+        default=42,
+        help='SHAP分析的随机种子，用于保证结果可复现（默认42）',
     )
     parser_predict.set_defaults(func=cmd_predict)
 

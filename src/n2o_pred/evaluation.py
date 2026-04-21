@@ -603,6 +603,7 @@ def compute_shap_values(
     background_size: int | None = None,
     n_explain: int | None = None,
     nsamples: int | None = None,
+    shap_seed: int = 42,
 ) -> tuple[np.ndarray, list[str]]:
     """
     计算SHAP值
@@ -617,6 +618,7 @@ def compute_shap_values(
         background_size: 背景数据样本数（覆盖默认值）
         n_explain: 解释样本数（覆盖默认值）
         nsamples: SHAP扰动样本数（覆盖默认值）
+        shap_seed: SHAP分析的随机种子，用于保证结果可复现
 
     Returns:
         (SHAP值, 特征名称列表)
@@ -626,6 +628,12 @@ def compute_shap_values(
     except ImportError:
         logger.error("SHAP库未安装，请运行: pip install shap")
         raise
+
+    # 设置随机种子保证可复现性
+    np.random.seed(shap_seed)
+    torch.manual_seed(shap_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(shap_seed)
 
     if model_type == "rf":
         # 随机森林使用TreeExplainer
