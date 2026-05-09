@@ -220,6 +220,49 @@ def plot_feature_importance(
     logger.info(f"特征重要性图已保存到 {save_path}")
 
 
+def plot_shap_dependence(
+    feature_names: list[str],
+    shap_matrix: np.ndarray,
+    feature_data: np.ndarray,
+    save_dir: Path,
+) -> None:
+    """
+    绘制SHAP Dependence Plots并为每个特征保存数据和图
+
+    Args:
+        feature_names: 特征名称列表
+        shap_matrix: 原始SHAP值矩阵 (n_samples × n_features)
+        feature_data: 特征数据矩阵 (n_samples × n_features)
+        save_dir: 保存目录（图保存到 save_dir/figs，数据保存到 save_dir/tables）
+    """
+    figs_dir = save_dir / "figs"
+    tables_dir = save_dir / "tables"
+    figs_dir.mkdir(parents=True, exist_ok=True)
+    tables_dir.mkdir(parents=True, exist_ok=True)
+
+    for i, name in enumerate(feature_names):
+        feat_vals = feature_data[:, i]
+        shap_vals = shap_matrix[:, i]
+
+        # 保存CSV数据
+        safe_name = name.replace(" ", "_").replace("/", "_")
+        dep_df = pd.DataFrame({"feature_value": feat_vals, "shap_value": shap_vals})
+        dep_df.to_csv(tables_dir / f"shap_dependence_{safe_name}.csv", index=False)
+
+        # 绘制散点图
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.scatter(feat_vals, shap_vals, s=6, c="#08306b", alpha=0.6, edgecolors="none")
+        ax.set_xlabel(name, fontsize=10)
+        ax.set_ylabel(f"SHAP value for {name}", fontsize=10)
+        ax.set_title(f"SHAP Dependence: {name}", fontsize=11, fontweight="bold")
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(figs_dir / f"shap_dependence_{safe_name}.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+    logger.info(f"SHAP Dependence Plots已保存到 {figs_dir}，数据已保存到 {tables_dir}")
+
+
 def plot_sequence_predictions(
     seq_id: tuple,
     time_steps: np.ndarray,
@@ -604,7 +647,8 @@ def compute_shap_values(
     n_explain: int | None = None,
     nsamples: int | None = None,
     shap_seed: int = 42,
-) -> tuple[np.ndarray, list[str]]:
+    return_raw: bool = False,
+) -> tuple[np.ndarray, list[str]] | tuple[np.ndarray, list[str], np.ndarray, np.ndarray]:
     """
     计算SHAP值
 
@@ -619,9 +663,11 @@ def compute_shap_values(
         n_explain: 解释样本数（覆盖默认值）
         nsamples: SHAP扰动样本数（覆盖默认值）
         shap_seed: SHAP分析的随机种子，用于保证结果可复现
+        return_raw: 是否返回原始SHAP矩阵和特征数据（用于Dependence Plots）
 
     Returns:
-        (SHAP值, 特征名称列表)
+        return_raw=False: (平均绝对SHAP值, 特征名称列表)
+        return_raw=True: (平均绝对SHAP值, 特征名称列表, 原始SHAP矩阵, 特征数据矩阵)
     """
     try:
         import shap
@@ -665,6 +711,8 @@ def compute_shap_values(
         # 计算平均绝对SHAP值作为特征重要性
         mean_abs_shap = np.abs(shap_values).mean(axis=0)
 
+        if return_raw:
+            return mean_abs_shap, feature_names, shap_values, X
         return mean_abs_shap, feature_names
 
     else:
@@ -728,6 +776,8 @@ def compute_shap_values(
         # 计算平均绝对SHAP值作为特征重要性
         mean_abs_shap = np.abs(shap_values).mean(axis=0)
 
+        if return_raw:
+            return mean_abs_shap, model_wrapper.feature_names, shap_values, explain_data
         return mean_abs_shap, model_wrapper.feature_names
 
 

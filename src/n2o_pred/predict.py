@@ -491,7 +491,7 @@ def predict_with_model(
     }
 
     # 导入需要的函数
-    from .evaluation import save_predictions_to_csv, compute_shap_values, plot_feature_importance
+    from .evaluation import save_predictions_to_csv, compute_shap_values, plot_feature_importance, plot_shap_dependence
 
     if model_type == 'rf':
         # 随机森林预测 - 传入BaseN2ODataset而不是DataFrame，这样返回的data_with_predictions会有sequences属性
@@ -544,7 +544,7 @@ def predict_with_model(
             logger.info('计算RF模型的特征重要性（使用SHAP）...')
             # 合并所有数据集
             all_df = pd.concat([train_df, val_df, test_df], ignore_index=True)
-            shap_values, feature_names = compute_shap_values(
+            shap_values, feature_names, shap_matrix, feat_data = compute_shap_values(
                 predictor.model,
                 all_df,
                 model_type,
@@ -554,6 +554,7 @@ def predict_with_model(
                 n_explain=100,
                 nsamples=32,
                 shap_seed=shap_seed,
+                return_raw=True,
             )
             # 保存特征重要性CSV
             importance_df = pd.DataFrame(
@@ -565,6 +566,8 @@ def predict_with_model(
             importance_df.to_csv(tables_dir / 'feature_importance.csv', index=False)
             # 保存特征重要性图
             plot_feature_importance(feature_names, shap_values, figs_dir / 'feature_importance.png')
+            # 保存SHAP Dependence Plots
+            plot_shap_dependence(feature_names, shap_matrix, feat_data, output_dir)
         except Exception as e:
             logger.warning(f'SHAP分析失败: {e}')
 
@@ -825,7 +828,7 @@ def predict_with_model(
                 all_dataset = N2ODatasetForDailyStepRNN(
                     all_base, fit_scalers=False, scalers=predictor.scalers
                 )
-            shap_values, feature_names = compute_shap_values(
+            shap_values, feature_names, shap_matrix, feat_data = compute_shap_values(
                 predictor.model,
                 all_dataset,
                 model_type,
@@ -835,6 +838,7 @@ def predict_with_model(
                 n_explain=100,
                 nsamples=32,
                 shap_seed=shap_seed,
+                return_raw=True,
             )
             # 保存特征重要性CSV
             importance_df = pd.DataFrame(
@@ -846,6 +850,8 @@ def predict_with_model(
             importance_df.to_csv(tables_dir / 'feature_importance.csv', index=False)
             # 保存特征重要性图
             plot_feature_importance(feature_names, shap_values, figs_dir / 'feature_importance.png')
+            # 保存SHAP Dependence Plots
+            plot_shap_dependence(feature_names, shap_matrix, feat_data, output_dir)
         except Exception as e:
             logger.warning(f'SHAP分析失败: {e}')
 
