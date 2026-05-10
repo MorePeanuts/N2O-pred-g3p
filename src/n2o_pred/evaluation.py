@@ -220,47 +220,197 @@ def plot_feature_importance(
     logger.info(f"特征重要性图已保存到 {save_path}")
 
 
-def plot_shap_dependence(
+def compute_and_plot_pdp(
+    model: Any,
+    data: Any,
+    model_type: str,
     feature_names: list[str],
-    shap_matrix: np.ndarray,
-    feature_data: np.ndarray,
     save_dir: Path,
+    device: str = "cpu",
+    n_grid: int = 50,
 ) -> None:
     """
-    绘制SHAP Dependence Plots并为每个特征保存数据和图
+    计算并绘制Partial Dependence Plots (PDP)
 
     Args:
+        model: 模型（RF的N2OPredictorRF或RNN模型）
+        data: RF时为DataFrame，RNN时为Dataset
+        model_type: 模型类型 ('rf', 'rnn-obs', 'rnn-daily')
         feature_names: 特征名称列表
-        shap_matrix: 原始SHAP值矩阵 (n_samples × n_features)
-        feature_data: 特征数据矩阵 (n_samples × n_features)
         save_dir: 保存目录（图保存到 save_dir/figs，数据保存到 save_dir/tables）
+        device: 设备（RNN模型使用）
+        n_grid: PDP网格点数
     """
     figs_dir = save_dir / "figs"
     tables_dir = save_dir / "tables"
     figs_dir.mkdir(parents=True, exist_ok=True)
     tables_dir.mkdir(parents=True, exist_ok=True)
 
+    if model_type == "rf":
+        _compute_pdp_rf(model, data, feature_names, figs_dir, tables_dir, n_grid)
+    else:
+        _compute_pdp_rnn(model, data, model_type, feature_names, figs_dir, tables_dir, device, n_grid)
+
+    logger.info(f"Partial Dependence Plots已保存到 {figs_dir}，数据已保存到 {tables_dir}")
+
+
+def _compute_pdp_rf(
+    model: Any,
+    data: pd.DataFrame,
+    feature_names: list[str],
+    figs_dir: Path,
+    tables_dir: Path,
+    n_grid: int,
+) -> None:
+    """RF模型的PDP计算，使用sklearn的partial_dependence"""
+    from sklearn.inspection import partial_dependence
+
+    X = data[feature_names].values
+
     for i, name in enumerate(feature_names):
-        feat_vals = feature_data[:, i]
-        shap_vals = shap_matrix[:, i]
+        result = partial_dependence(
+            model.model, X, features=[i], kind="average", grid_resolution=n_grid
+        )
+        grid = result["grid_values"][0]
+        pdp_values = result["average"][0]
 
-        # 保存CSV数据
         safe_name = name.replace(" ", "_").replace("/", "_")
-        dep_df = pd.DataFrame({"feature_value": feat_vals, "shap_value": shap_vals})
-        dep_df.to_csv(tables_dir / f"shap_dependence_{safe_name}.csv", index=False)
+        pd_df = pd.DataFrame({"feature_value": grid, "partial_dependence": pdp_values})
+        pd_df.to_csv(tables_dir / f"pdp_{safe_name}.csv", index=False)
 
-        # 绘制散点图
         fig, ax = plt.subplots(figsize=(6, 4))
-        ax.scatter(feat_vals, shap_vals, s=6, c="#08306b", alpha=0.6, edgecolors="none")
+        ax.plot(grid, pdp_values, color="#08306b", linewidth=1.5)
         ax.set_xlabel(name, fontsize=10)
-        ax.set_ylabel(f"SHAP value for {name}", fontsize=10)
-        ax.set_title(f"SHAP Dependence: {name}", fontsize=11, fontweight="bold")
+        ax.set_ylabel("Partial dependence", fontsize=10)
+        ax.set_title(f"PDP: {name}", fontsize=11, fontweight="bold")
         ax.grid(alpha=0.3)
         fig.tight_layout()
-        fig.savefig(figs_dir / f"shap_dependence_{safe_name}.png", dpi=300, bbox_inches="tight")
+        fig.savefig(figs_dir / f"pdp_{safe_name}.png", dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-    logger.info(f"SHAP Dependence Plots已保存到 {figs_dir}，数据已保存到 {tables_dir}")
+
+def _compute_pdp_rnn(
+    model: Any,
+    data: Any,
+    model_type: str,
+    feature_names: list[str],
+    figs_dir: Path,
+    tables_dir: Path,
+    device: str,
+    n_grid: int,
+) -> None:
+    """RNN模型的PDP计算，直接修改processed序列特征后批量送入模型"""
+    from .preprocessing import (
+        CATEGORICAL_DYNAMIC_FEATURES,
+        CATEGORICAL_STATIC_FEATURES,
+        NUMERIC_DYNAMIC_FEATURES_RNN,
+        NUMERIC_STATIC_FEATURES,
+    )
+    from .dataset import collate_fn
+
+    torch_device = torch.device(device)
+    model.to(torch_device)
+    model.eval()
+
+    n_static_num = len(NUMERIC_STATIC_FEATURES)
+    n_static_cat = len(CATEGORICAL_STATIC_FEATURES)
+    n_dynamic_num = len(NUMERIC_DYNAMIC_FEATURES_RNN)
+    n_dynamic_cat = len(CATEGORICAL_DYNAMIC_FEATURES)
+
+    n_samples = len(data)
+    batch_size = 32 if torch_device.type == "cuda" else 16
+
+    # 预先获取所有序列的processed数据
+    seq_data_list = []
+    for idx in range(n_samples):
+        item = data[idx]
+        seq_data_list.append({
+            "static_numeric": item["static_numeric"].clone(),
+            "static_categorical": item["static_categorical"].clone(),
+            "dynamic_numeric": item["dynamic_numeric"].clone(),
+            "dynamic_categorical": item["dynamic_categorical"].clone(),
+            "seq_length": item["seq_length"],
+        })
+
+    def _predict_batch(seq_batch: list[dict]) -> np.ndarray:
+        """对一批序列数据运行模型并返回反标准化后的预测均值"""
+        batch_dict = collate_fn(seq_batch)
+        sn = batch_dict["static_numeric"].to(torch_device)
+        sc = batch_dict["static_categorical"].to(torch_device)
+        dn = batch_dict["dynamic_numeric"].to(torch_device)
+        dc = batch_dict["dynamic_categorical"].to(torch_device)
+        sl = batch_dict["seq_lengths"].to(torch_device)
+        with torch.no_grad():
+            preds = model(sn, sc, dn, dc, sl)
+        results = np.zeros(len(seq_batch))
+        for k in range(len(seq_batch)):
+            seq_len = sl[k].item()
+            pred_mean = preds[k, :seq_len].mean().item()
+            results[k] = data.inverse_transform_targets(np.array([pred_mean]))[0]
+        return results
+
+    # 对每个特征计算PDP
+    for feat_idx, name in enumerate(feature_names):
+        # 收集该特征在所有样本中的值，用于确定grid范围
+        if feat_idx < n_static_num:
+            feat_vals = np.array([seq["static_numeric"][feat_idx].item() for seq in seq_data_list])
+        elif feat_idx < n_static_num + n_static_cat:
+            cat_idx = feat_idx - n_static_num
+            feat_vals = np.array([seq["static_categorical"][cat_idx].item() for seq in seq_data_list])
+        elif feat_idx < n_static_num + n_static_cat + n_dynamic_num:
+            dyn_idx = feat_idx - n_static_num - n_static_cat
+            feat_vals = np.array([seq["dynamic_numeric"][:, dyn_idx].mean().item() for seq in seq_data_list])
+        else:
+            from scipy import stats as sp_stats
+            cat_idx = feat_idx - n_static_num - n_static_cat - n_dynamic_num
+            vals = []
+            for seq in seq_data_list:
+                cat_vals = seq["dynamic_categorical"][:, cat_idx].numpy()
+                mode_result = sp_stats.mode(cat_vals, keepdims=True)
+                vals.append(mode_result.mode[0])
+            feat_vals = np.array(vals)
+
+        feat_min, feat_max = feat_vals.min(), feat_vals.max()
+        if feat_min == feat_max:
+            continue
+        grid = np.linspace(feat_min, feat_max, n_grid)
+        pdp_values = np.zeros(n_grid)
+
+        for j, val in enumerate(grid):
+            all_preds = []
+            for batch_start in range(0, n_samples, batch_size):
+                batch_end = min(batch_start + batch_size, n_samples)
+                batch_seqs = []
+                for k in range(batch_start, batch_end):
+                    modified = {key: val_t.clone() for key, val_t in seq_data_list[k].items()}
+                    if feat_idx < n_static_num:
+                        modified["static_numeric"][feat_idx] = val
+                    elif feat_idx < n_static_num + n_static_cat:
+                        cat_idx = feat_idx - n_static_num
+                        modified["static_categorical"][cat_idx] = int(round(val))
+                    elif feat_idx < n_static_num + n_static_cat + n_dynamic_num:
+                        dyn_idx = feat_idx - n_static_num - n_static_cat
+                        modified["dynamic_numeric"][:, dyn_idx] = val
+                    else:
+                        cat_idx = feat_idx - n_static_num - n_static_cat - n_dynamic_num
+                        modified["dynamic_categorical"][:, cat_idx] = int(round(val))
+                    batch_seqs.append(modified)
+                all_preds.append(_predict_batch(batch_seqs))
+            pdp_values[j] = np.concatenate(all_preds).mean()
+
+        safe_name = name.replace(" ", "_").replace("/", "_")
+        pd_df = pd.DataFrame({"feature_value": grid, "partial_dependence": pdp_values})
+        pd_df.to_csv(tables_dir / f"pdp_{safe_name}.csv", index=False)
+
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.plot(grid, pdp_values, color="#08306b", linewidth=1.5)
+        ax.set_xlabel(name, fontsize=10)
+        ax.set_ylabel("Partial dependence", fontsize=10)
+        ax.set_title(f"PDP: {name}", fontsize=11, fontweight="bold")
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(figs_dir / f"pdp_{safe_name}.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
 
 
 def plot_sequence_predictions(
@@ -647,8 +797,7 @@ def compute_shap_values(
     n_explain: int | None = None,
     nsamples: int | None = None,
     shap_seed: int = 42,
-    return_raw: bool = False,
-) -> tuple[np.ndarray, list[str]] | tuple[np.ndarray, list[str], np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, list[str]]:
     """
     计算SHAP值
 
@@ -663,11 +812,9 @@ def compute_shap_values(
         n_explain: 解释样本数（覆盖默认值）
         nsamples: SHAP扰动样本数（覆盖默认值）
         shap_seed: SHAP分析的随机种子，用于保证结果可复现
-        return_raw: 是否返回原始SHAP矩阵和特征数据（用于Dependence Plots）
 
     Returns:
-        return_raw=False: (平均绝对SHAP值, 特征名称列表)
-        return_raw=True: (平均绝对SHAP值, 特征名称列表, 原始SHAP矩阵, 特征数据矩阵)
+        (平均绝对SHAP值, 特征名称列表)
     """
     try:
         import shap
@@ -711,8 +858,6 @@ def compute_shap_values(
         # 计算平均绝对SHAP值作为特征重要性
         mean_abs_shap = np.abs(shap_values).mean(axis=0)
 
-        if return_raw:
-            return mean_abs_shap, feature_names, shap_values, X
         return mean_abs_shap, feature_names
 
     else:
@@ -776,8 +921,6 @@ def compute_shap_values(
         # 计算平均绝对SHAP值作为特征重要性
         mean_abs_shap = np.abs(shap_values).mean(axis=0)
 
-        if return_raw:
-            return mean_abs_shap, model_wrapper.feature_names, shap_values, explain_data
         return mean_abs_shap, model_wrapper.feature_names
 
 

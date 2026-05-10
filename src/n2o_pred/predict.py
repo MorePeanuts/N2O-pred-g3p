@@ -491,7 +491,7 @@ def predict_with_model(
     }
 
     # 导入需要的函数
-    from .evaluation import save_predictions_to_csv, compute_shap_values, plot_feature_importance, plot_shap_dependence
+    from .evaluation import save_predictions_to_csv, compute_shap_values, plot_feature_importance, compute_and_plot_pdp
 
     if model_type == 'rf':
         # 随机森林预测 - 传入BaseN2ODataset而不是DataFrame，这样返回的data_with_predictions会有sequences属性
@@ -544,7 +544,7 @@ def predict_with_model(
             logger.info('计算RF模型的特征重要性（使用SHAP）...')
             # 合并所有数据集
             all_df = pd.concat([train_df, val_df, test_df], ignore_index=True)
-            shap_values, feature_names, shap_matrix, feat_data = compute_shap_values(
+            shap_values, feature_names = compute_shap_values(
                 predictor.model,
                 all_df,
                 model_type,
@@ -554,7 +554,6 @@ def predict_with_model(
                 n_explain=100,
                 nsamples=32,
                 shap_seed=shap_seed,
-                return_raw=True,
             )
             # 保存特征重要性CSV
             importance_df = pd.DataFrame(
@@ -566,10 +565,28 @@ def predict_with_model(
             importance_df.to_csv(tables_dir / 'feature_importance.csv', index=False)
             # 保存特征重要性图
             plot_feature_importance(feature_names, shap_values, figs_dir / 'feature_importance.png')
-            # 保存SHAP Dependence Plots
-            plot_shap_dependence(feature_names, shap_matrix, feat_data, output_path)
         except Exception as e:
             logger.warning(f'SHAP分析失败: {e}')
+
+        # 计算并保存Partial Dependence Plots
+        try:
+            logger.info('计算Partial Dependence Plots...')
+            all_df = pd.concat([train_df, val_df, test_df], ignore_index=True)
+            from .preprocessing import (
+                CATEGORICAL_DYNAMIC_FEATURES,
+                CATEGORICAL_STATIC_FEATURES,
+                NUMERIC_DYNAMIC_FEATURES,
+                NUMERIC_STATIC_FEATURES,
+            )
+            feature_names = (
+                NUMERIC_STATIC_FEATURES
+                + NUMERIC_DYNAMIC_FEATURES
+                + CATEGORICAL_STATIC_FEATURES
+                + CATEGORICAL_DYNAMIC_FEATURES
+            )
+            compute_and_plot_pdp(predictor.model, all_df, model_type, feature_names, output_path, device)
+        except Exception as e:
+            logger.warning(f'PDP分析失败: {e}')
 
         # 绘制序列预测图
         if plot_sequences and figs_dir is not None:
@@ -828,7 +845,7 @@ def predict_with_model(
                 all_dataset = N2ODatasetForDailyStepRNN(
                     all_base, fit_scalers=False, scalers=predictor.scalers
                 )
-            shap_values, feature_names, shap_matrix, feat_data = compute_shap_values(
+            shap_values, feature_names = compute_shap_values(
                 predictor.model,
                 all_dataset,
                 model_type,
@@ -838,7 +855,6 @@ def predict_with_model(
                 n_explain=100,
                 nsamples=32,
                 shap_seed=shap_seed,
-                return_raw=True,
             )
             # 保存特征重要性CSV
             importance_df = pd.DataFrame(
@@ -850,10 +866,37 @@ def predict_with_model(
             importance_df.to_csv(tables_dir / 'feature_importance.csv', index=False)
             # 保存特征重要性图
             plot_feature_importance(feature_names, shap_values, figs_dir / 'feature_importance.png')
-            # 保存SHAP Dependence Plots
-            plot_shap_dependence(feature_names, shap_matrix, feat_data, output_path)
         except Exception as e:
             logger.warning(f'SHAP分析失败: {e}')
+
+        # 计算并保存Partial Dependence Plots
+        try:
+            logger.info('计算Partial Dependence Plots...')
+            all_sequences = train_base.sequences + val_base.sequences + test_base.sequences
+            all_base = BaseN2ODataset(sequences=all_sequences)
+            if model_type == 'rnn-obs':
+                all_dataset = N2ODatasetForObsStepRNN(
+                    all_base, fit_scalers=False, scalers=predictor.scalers
+                )
+            else:
+                all_dataset = N2ODatasetForDailyStepRNN(
+                    all_base, fit_scalers=False, scalers=predictor.scalers
+                )
+            from .preprocessing import (
+                CATEGORICAL_DYNAMIC_FEATURES,
+                CATEGORICAL_STATIC_FEATURES,
+                NUMERIC_DYNAMIC_FEATURES_RNN,
+                NUMERIC_STATIC_FEATURES,
+            )
+            feature_names = (
+                NUMERIC_STATIC_FEATURES
+                + CATEGORICAL_STATIC_FEATURES
+                + NUMERIC_DYNAMIC_FEATURES_RNN
+                + CATEGORICAL_DYNAMIC_FEATURES
+            )
+            compute_and_plot_pdp(predictor.model, all_dataset, model_type, feature_names, output_path, device)
+        except Exception as e:
+            logger.warning(f'PDP分析失败: {e}')
 
         # 绘制序列预测图
         if plot_sequences and figs_dir is not None:
