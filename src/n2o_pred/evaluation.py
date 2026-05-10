@@ -382,7 +382,7 @@ def _compute_pdp_rnn(
                 batch_end = min(batch_start + batch_size, n_samples)
                 batch_seqs = []
                 for k in range(batch_start, batch_end):
-                    modified = {key: val_t.clone() for key, val_t in seq_data_list[k].items()}
+                    modified = {key: val_t.clone() if hasattr(val_t, 'clone') else val_t for key, val_t in seq_data_list[k].items()}
                     if feat_idx < n_static_num:
                         modified["static_numeric"][feat_idx] = val
                     elif feat_idx < n_static_num + n_static_cat:
