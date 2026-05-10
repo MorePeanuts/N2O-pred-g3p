@@ -299,7 +299,7 @@ def _compute_pdp_rnn(
     device: str,
     n_grid: int,
 ) -> None:
-    """RNN模型的PDP计算，直接修改processed序列特征后批量送入模型"""
+    """RNN模型的PDP计算，在原始特征空间建grid，变换到缩放空间送入模型"""
     from .preprocessing import (
         CATEGORICAL_DYNAMIC_FEATURES,
         CATEGORICAL_STATIC_FEATURES,
@@ -319,6 +319,21 @@ def _compute_pdp_rnn(
 
     n_samples = len(data)
     batch_size = 32 if torch_device.type == "cuda" else 16
+
+    scalers = data.scalers
+
+    # 静态数值特征名 → 对应scaler名
+    static_num_scaler_names = ["clay_scaler", "cec_scaler", "bd_scaler", "ph_scaler", "soc_scaler", "tn_scaler"]
+    # 动态数值特征名 → 对应scaler名和变换方式
+    # NUMERIC_DYNAMIC_FEATURES_RNN = ["Temp", "Prec", "ST", "WFPS", "Split N amount", "ferdur"]
+    dynamic_num_info = [
+        ("temp_scaler", None),         # Temp: StandardScaler only
+        ("prec_scaler", "log1p"),      # Prec: log1p + StandardScaler
+        ("st_scaler", None),           # ST: StandardScaler only
+        ("wfps_scaler", None),         # WFPS: StandardScaler only
+        ("split_n_scaler", "log1p"),   # Split N amount: log1p + StandardScaler
+        ("ferdur_scaler", "log1p"),    # ferdur: log1p + StandardScaler
+    ]
 
     # 预先获取所有序列的processed数据
     seq_data_list = []
@@ -351,17 +366,38 @@ def _compute_pdp_rnn(
             results[k] = data.inverse_transform_targets(np.array([pred_mean]))[0]
         return results
 
+    def _inverse_transform_value(scaled_val: float, scaler_name: str, transform: str | None) -> float:
+        """将缩放后的值反变换到原始空间"""
+        val = scalers[scaler_name].inverse_transform([[scaled_val]])[0, 0]
+        if transform == "log1p":
+            val = np.expm1(val)
+        return val
+
+    def _forward_transform_value(raw_val: float, scaler_name: str, transform: str | None) -> float:
+        """将原始值变换到缩放空间"""
+        val = raw_val
+        if transform == "log1p":
+            val = np.log1p(val)
+        return scalers[scaler_name].transform([[val]])[0, 0]
+
     # 对每个特征计算PDP
     for feat_idx, name in enumerate(feature_names):
-        # 收集该特征在所有样本中的值，用于确定grid范围
+        # 收集该特征在所有样本中的缩放后值，反变换到原始空间
         if feat_idx < n_static_num:
-            feat_vals = np.array([seq["static_numeric"][feat_idx].item() for seq in seq_data_list])
+            scaled_vals = np.array([seq["static_numeric"][feat_idx].item() for seq in seq_data_list])
+            scaler_name = static_num_scaler_names[feat_idx]
+            transform = None
+            orig_vals = np.array([_inverse_transform_value(v, scaler_name, transform) for v in scaled_vals])
         elif feat_idx < n_static_num + n_static_cat:
             cat_idx = feat_idx - n_static_num
-            feat_vals = np.array([seq["static_categorical"][cat_idx].item() for seq in seq_data_list])
+            orig_vals = np.array([seq["static_categorical"][cat_idx].item() for seq in seq_data_list])
+            scaler_name = None
+            transform = None
         elif feat_idx < n_static_num + n_static_cat + n_dynamic_num:
             dyn_idx = feat_idx - n_static_num - n_static_cat
-            feat_vals = np.array([seq["dynamic_numeric"][:, dyn_idx].mean().item() for seq in seq_data_list])
+            scaled_vals = np.array([seq["dynamic_numeric"][:, dyn_idx].mean().item() for seq in seq_data_list])
+            scaler_name, transform = dynamic_num_info[dyn_idx]
+            orig_vals = np.array([_inverse_transform_value(v, scaler_name, transform) for v in scaled_vals])
         else:
             from scipy import stats as sp_stats
             cat_idx = feat_idx - n_static_num - n_static_cat - n_dynamic_num
@@ -370,42 +406,49 @@ def _compute_pdp_rnn(
                 cat_vals = seq["dynamic_categorical"][:, cat_idx].numpy()
                 mode_result = sp_stats.mode(cat_vals, keepdims=True)
                 vals.append(mode_result.mode[0])
-            feat_vals = np.array(vals)
+            orig_vals = np.array(vals)
+            scaler_name = None
+            transform = None
 
-        feat_min, feat_max = feat_vals.min(), feat_vals.max()
+        feat_min, feat_max = orig_vals.min(), orig_vals.max()
         if feat_min == feat_max:
             continue
-        grid = np.linspace(feat_min, feat_max, n_grid)
+
+        # 在原始空间建grid
+        grid_orig = np.linspace(feat_min, feat_max, n_grid)
         pdp_values = np.zeros(n_grid)
 
-        for j, val in enumerate(grid):
+        for j, raw_val in enumerate(grid_orig):
+            # 将原始值变换到缩放空间
+            if scaler_name is not None:
+                scaled_val = _forward_transform_value(raw_val, scaler_name, transform)
+            else:
+                scaled_val = raw_val
+
             all_preds = []
             for batch_start in range(0, n_samples, batch_size):
                 batch_end = min(batch_start + batch_size, n_samples)
                 batch_seqs = []
                 for k in range(batch_start, batch_end):
-                    modified = {key: val_t.clone() if hasattr(val_t, 'clone') else val_t for key, val_t in seq_data_list[k].items()}
+                    modified = {key: v.clone() if hasattr(v, 'clone') else v for key, v in seq_data_list[k].items()}
                     if feat_idx < n_static_num:
-                        modified["static_numeric"][feat_idx] = val
+                        modified["static_numeric"][feat_idx] = scaled_val
                     elif feat_idx < n_static_num + n_static_cat:
-                        cat_idx = feat_idx - n_static_num
-                        modified["static_categorical"][cat_idx] = int(round(val))
+                        modified["static_categorical"][cat_idx] = int(round(scaled_val))
                     elif feat_idx < n_static_num + n_static_cat + n_dynamic_num:
-                        dyn_idx = feat_idx - n_static_num - n_static_cat
-                        modified["dynamic_numeric"][:, dyn_idx] = val
+                        modified["dynamic_numeric"][:, dyn_idx] = scaled_val
                     else:
-                        cat_idx = feat_idx - n_static_num - n_static_cat - n_dynamic_num
-                        modified["dynamic_categorical"][:, cat_idx] = int(round(val))
+                        modified["dynamic_categorical"][:, cat_idx] = int(round(scaled_val))
                     batch_seqs.append(modified)
                 all_preds.append(_predict_batch(batch_seqs))
             pdp_values[j] = np.concatenate(all_preds).mean()
 
         safe_name = name.replace(" ", "_").replace("/", "_")
-        pd_df = pd.DataFrame({"feature_value": grid, "partial_dependence": pdp_values})
+        pd_df = pd.DataFrame({"feature_value": grid_orig, "partial_dependence": pdp_values})
         pd_df.to_csv(tables_dir / f"pdp_{safe_name}.csv", index=False)
 
         fig, ax = plt.subplots(figsize=(6, 4))
-        ax.plot(grid, pdp_values, color="#08306b", linewidth=1.5)
+        ax.plot(grid_orig, pdp_values, color="#08306b", linewidth=1.5)
         ax.set_xlabel(name, fontsize=10)
         ax.set_ylabel("Partial dependence", fontsize=10)
         ax.set_title(f"PDP: {name}", fontsize=11, fontweight="bold")
