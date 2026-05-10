@@ -329,6 +329,8 @@ def _compute_pdp_rnn(
             "static_categorical": item["static_categorical"].clone(),
             "dynamic_numeric": item["dynamic_numeric"].clone(),
             "dynamic_categorical": item["dynamic_categorical"].clone(),
+            "targets": item["targets"].clone(),
+            "targets_original": item["targets_original"].clone(),
             "seq_length": item["seq_length"],
         })
 
