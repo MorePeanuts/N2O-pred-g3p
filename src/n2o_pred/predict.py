@@ -567,7 +567,7 @@ def predict_with_model(
             # 保存特征重要性图
             plot_feature_importance(feature_names, shap_values, figs_dir / 'feature_importance.png')
             # 保存SHAP Dependence Plots
-            plot_shap_dependence(feature_names, shap_matrix, feat_data, output_dir)
+            plot_shap_dependence(feature_names, shap_matrix, feat_data, output_path)
         except Exception as e:
             logger.warning(f'SHAP分析失败: {e}')
 
@@ -851,7 +851,7 @@ def predict_with_model(
             # 保存特征重要性图
             plot_feature_importance(feature_names, shap_values, figs_dir / 'feature_importance.png')
             # 保存SHAP Dependence Plots
-            plot_shap_dependence(feature_names, shap_matrix, feat_data, output_dir)
+            plot_shap_dependence(feature_names, shap_matrix, feat_data, output_path)
         except Exception as e:
             logger.warning(f'SHAP分析失败: {e}')
 
