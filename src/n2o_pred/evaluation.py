@@ -262,24 +262,34 @@ def _compute_pdp_rf(
     tables_dir: Path,
     n_grid: int,
 ) -> None:
-    """RF模型的PDP计算，使用sklearn的partial_dependence"""
+    """RF模型的PDP+ICE计算，使用sklearn的partial_dependence"""
     from sklearn.inspection import partial_dependence
 
     X = data[feature_names].values
 
     for i, name in enumerate(feature_names):
         result = partial_dependence(
-            model.model, X, features=[i], kind="average", grid_resolution=n_grid
+            model.model, X, features=[i], kind="both", grid_resolution=n_grid
         )
         grid = result["grid_values"][0]
         pdp_values = result["average"][0]
+        ice_values = result["individual"][0]  # (n_samples, n_grid)
 
         safe_name = name.replace(" ", "_").replace("/", "_")
+        # 保存PDP+ICE数据
         pd_df = pd.DataFrame({"feature_value": grid, "partial_dependence": pdp_values})
         pd_df.to_csv(tables_dir / f"pdp_{safe_name}.csv", index=False)
+        ice_df = pd.DataFrame(ice_values.T, columns=[f"sample_{k}" for k in range(ice_values.shape[0])])
+        ice_df.insert(0, "feature_value", grid)
+        ice_df.to_csv(tables_dir / f"ice_{safe_name}.csv", index=False)
 
         fig, ax = plt.subplots(figsize=(6, 4))
-        ax.plot(grid, pdp_values, color="#08306b", linewidth=1.5)
+        # ICE曲线（浅色细线）
+        ax.plot(grid, ice_values.T, color="#a8d5f2", linewidth=0.4, alpha=0.5)
+        # PDP曲线（深色粗线）
+        ax.plot(grid, pdp_values, color="#08306b", linewidth=1.8)
+        # Rug plot
+        ax.plot(X[:, i], np.full(X[:, i].shape, ax.get_ylim()[0]), "|", color="#555555", alpha=0.4, markersize=4)
         ax.set_xlabel(name, fontsize=10)
         ax.set_ylabel("Partial dependence", fontsize=10)
         ax.set_title(f"PDP: {name}", fontsize=11, fontweight="bold")
@@ -416,7 +426,7 @@ def _compute_pdp_rnn(
 
         # 在原始空间建grid
         grid_orig = np.linspace(feat_min, feat_max, n_grid)
-        pdp_values = np.zeros(n_grid)
+        ice_values = np.zeros((n_samples, n_grid))
 
         for j, raw_val in enumerate(grid_orig):
             # 将原始值变换到缩放空间
@@ -425,7 +435,6 @@ def _compute_pdp_rnn(
             else:
                 scaled_val = raw_val
 
-            all_preds = []
             for batch_start in range(0, n_samples, batch_size):
                 batch_end = min(batch_start + batch_size, n_samples)
                 batch_seqs = []
@@ -440,15 +449,27 @@ def _compute_pdp_rnn(
                     else:
                         modified["dynamic_categorical"][:, cat_idx] = int(round(scaled_val))
                     batch_seqs.append(modified)
-                all_preds.append(_predict_batch(batch_seqs))
-            pdp_values[j] = np.concatenate(all_preds).mean()
+                batch_preds = _predict_batch(batch_seqs)
+                ice_values[batch_start:batch_end, j] = batch_preds
+
+        pdp_values = ice_values.mean(axis=0)
 
         safe_name = name.replace(" ", "_").replace("/", "_")
+        # 保存PDP数据
         pd_df = pd.DataFrame({"feature_value": grid_orig, "partial_dependence": pdp_values})
         pd_df.to_csv(tables_dir / f"pdp_{safe_name}.csv", index=False)
+        # 保存ICE数据
+        ice_df = pd.DataFrame(ice_values.T, columns=[f"sample_{k}" for k in range(n_samples)])
+        ice_df.insert(0, "feature_value", grid_orig)
+        ice_df.to_csv(tables_dir / f"ice_{safe_name}.csv", index=False)
 
         fig, ax = plt.subplots(figsize=(6, 4))
-        ax.plot(grid_orig, pdp_values, color="#08306b", linewidth=1.5)
+        # ICE曲线（浅色细线）
+        ax.plot(grid_orig, ice_values.T, color="#a8d5f2", linewidth=0.4, alpha=0.5)
+        # PDP曲线（深色粗线）
+        ax.plot(grid_orig, pdp_values, color="#08306b", linewidth=1.8)
+        # Rug plot
+        ax.plot(orig_vals, np.full(orig_vals.shape, ax.get_ylim()[0]), "|", color="#555555", alpha=0.4, markersize=4)
         ax.set_xlabel(name, fontsize=10)
         ax.set_ylabel("Partial dependence", fontsize=10)
         ax.set_title(f"PDP: {name}", fontsize=11, fontweight="bold")
