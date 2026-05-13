@@ -390,33 +390,39 @@ def _compute_pdp_rnn(
             val = np.log1p(val)
         return scalers[scaler_name].transform([[val]])[0, 0]
 
+    # 从base_data直接获取原始值用于确定grid范围和rug plot
+    base_sequences = data.base_data.sequences
+
     # 对每个特征计算PDP
     for feat_idx, name in enumerate(feature_names):
-        # 收集该特征在所有样本中的缩放后值，反变换到原始空间
+        # 直接从base_data收集原始值
         if feat_idx < n_static_num:
-            scaled_vals = np.array([seq["static_numeric"][feat_idx].item() for seq in seq_data_list])
+            orig_vals = np.array([base_sequences[s]["numeric_static"][feat_idx] for s in range(n_samples)])
             scaler_name = static_num_scaler_names[feat_idx]
             transform = None
-            orig_vals = np.array([_inverse_transform_value(v, scaler_name, transform) for v in scaled_vals])
         elif feat_idx < n_static_num + n_static_cat:
             cat_idx = feat_idx - n_static_num
-            orig_vals = np.array([seq["static_categorical"][cat_idx].item() for seq in seq_data_list])
+            orig_vals = np.array([base_sequences[s]["categorical_static"][cat_idx] for s in range(n_samples)])
             scaler_name = None
             transform = None
         elif feat_idx < n_static_num + n_static_cat + n_dynamic_num:
             dyn_idx = feat_idx - n_static_num - n_static_cat
-            scaled_vals = np.array([seq["dynamic_numeric"][:, dyn_idx].mean().item() for seq in seq_data_list])
+            # 动态特征：展平所有时间步的值
+            all_vals = []
+            for s in range(n_samples):
+                seq_len = base_sequences[s]["seq_length"]
+                for t in range(seq_len):
+                    all_vals.append(base_sequences[s]["numeric_dynamic"][t][dyn_idx])
+            orig_vals = np.array(all_vals)
             scaler_name, transform = dynamic_num_info[dyn_idx]
-            orig_vals = np.array([_inverse_transform_value(v, scaler_name, transform) for v in scaled_vals])
         else:
-            from scipy import stats as sp_stats
             cat_idx = feat_idx - n_static_num - n_static_cat - n_dynamic_num
-            vals = []
-            for seq in seq_data_list:
-                cat_vals = seq["dynamic_categorical"][:, cat_idx].numpy()
-                mode_result = sp_stats.mode(cat_vals, keepdims=True)
-                vals.append(mode_result.mode[0])
-            orig_vals = np.array(vals)
+            all_vals = []
+            for s in range(n_samples):
+                seq_len = base_sequences[s]["seq_length"]
+                for t in range(seq_len):
+                    all_vals.append(base_sequences[s]["categorical_dynamic"][t][cat_idx])
+            orig_vals = np.array(all_vals)
             scaler_name = None
             transform = None
 
